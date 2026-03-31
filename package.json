@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "description": "Native mobile calendar components. Part of Novastera CRM/ERP platform ecosystem. Provides calendar display and picker with time selection.",
   "main": "./lib/module/index.js",
+  "react-native": "./src/index.tsx",
   "types": "./lib/typescript/src/index.d.ts",
   "exports": {
     ".": {
       "source": "./src/index.tsx",
+      "react-native": "./src/index.tsx",
       "types": "./lib/typescript/src/index.d.ts",
       "default": "./lib/module/index.js"
     },
@@ -171,5 +173,7 @@
       "release-it"
     ],
     "version": "0.57.2"
+  },
+  "dependencies": {
   }
 }

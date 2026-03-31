@@ -114,5 +114,6 @@ android {
 
 dependencies {
   implementation "com.facebook.react:react-android"
+  implementation "androidx.recyclerview:recyclerview:1.4.0"
   implementation project(":react-native-nitro-modules")
 }

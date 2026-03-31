@@ -1,9 +1,13 @@
-import { View, StyleSheet } from 'react-native';
+import { useMemo, useRef, useState } from 'react';
+import React from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { callback } from 'react-native-nitro-modules';
 import {
   NitroCalendarView,
   NitroWheelPickerView,
   type CalendarAppearance,
   type CalendarStrings,
+  type NitroCalendarMethods,
 } from '@novastera-oss/nitro-calendar';
 
 const calendarAppearance: CalendarAppearance = {
@@ -30,17 +34,48 @@ const calendarStrings: CalendarStrings = {
 const wheelValues = ['00', '15', '30', '45'];
 
 export default function App() {
-  const now = Date.now();
+  const [selectedTimestampMs, setSelectedTimestampMs] = useState(() => Date.now());
+  const [collapsedWeekMode, setCollapsedWeekMode] = useState(false);
+  const calendarRef = useRef<NitroCalendarMethods | null>(null);
+  const selectedLabel = useMemo(
+    () => new Date(selectedTimestampMs).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' }),
+    [selectedTimestampMs],
+  );
 
   return (
     <View style={styles.container}>
+      <Text style={styles.title}>Phase 2 Native Calendar Harness</Text>
+      <Text style={styles.subtitle}>{selectedLabel}</Text>
+      <View style={styles.actions}>
+        <Pressable
+          style={styles.actionButton}
+          onPress={() => {
+            calendarRef.current?.goToToday();
+          }}
+        >
+          <Text style={styles.actionText}>Go To Today</Text>
+        </Pressable>
+        <Pressable
+          style={styles.actionButton}
+          onPress={() => {
+            const next = !collapsedWeekMode;
+            setCollapsedWeekMode(next);
+            calendarRef.current?.setCollapsedWeekModeEnabled(next);
+          }}
+        >
+          <Text style={styles.actionText}>{collapsedWeekMode ? 'Expand Month' : 'Collapse Week'}</Text>
+        </Pressable>
+      </View>
       <NitroCalendarView
-        selectedTimestampMs={now}
-        initialTimestampMs={now}
+        hybridRef={callback((ref: NitroCalendarMethods) => {
+          calendarRef.current = ref;
+        })}
+        selectedTimestampMs={selectedTimestampMs}
+        initialTimestampMs={selectedTimestampMs}
         calendarType="gregorian"
         isRTL={false}
-        viewMode="day"
-        collapsedWeekMode={false}
+        viewMode={collapsedWeekMode ? 'week' : 'day'}
+        collapsedWeekMode={collapsedWeekMode}
         weekStartsOn={1}
         uses24HourClock
         localeId="en-US"
@@ -48,9 +83,12 @@ export default function App() {
         appearanceKey="theme-default-v1"
         strings={calendarStrings}
         stringsKey="en-US-v1"
-        onDateChange={({ timestampMs }) => console.log(timestampMs)}
-        onVisibleRangeChange={({ startMs, endMs }) => console.log(startMs, endMs)}
-        onViewModeChange={({ mode }) => console.log(mode)}
+        onDateChange={callback(({ timestampMs }) => {
+          setSelectedTimestampMs(timestampMs);
+          console.log('onDateChange', timestampMs);
+        })}
+        onVisibleRangeChange={callback(({ startMs, endMs }) => console.log('onVisibleRangeChange', startMs, endMs))}
+        onViewModeChange={callback(({ mode }) => console.log('onViewModeChange', mode))}
         style={styles.calendar}
       />
       <NitroWheelPickerView
@@ -58,7 +96,7 @@ export default function App() {
         selectedIndex={0}
         itemHeight={36}
         visibleCount={5}
-        onSettled={({ index, value }) => console.log(index, value)}
+        onSettled={callback(({ index, value }) => console.log('onSettled', index, value))}
         style={styles.wheel}
       />
     </View>
@@ -68,18 +106,43 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingTop: 64,
+    paddingTop: 56,
+    paddingHorizontal: 16,
+    gap: 8,
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  subtitle: {
+    fontSize: 13,
+    color: '#4b5563',
+    marginBottom: 8,
+  },
+  actions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  actionButton: {
+    backgroundColor: '#2563eb',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  actionText: {
+    color: '#ffffff',
+    fontWeight: '600',
   },
   calendar: {
-    width: 320,
-    height: 300,
-    marginVertical: 20,
+    width: '100%',
+    height: 360,
+    marginTop: 8,
   },
   wheel: {
     width: 220,
-    height: 220,
-    marginVertical: 20,
+    height: 200,
+    alignSelf: 'center',
+    marginTop: 8,
   },
 });

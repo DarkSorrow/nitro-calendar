@@ -43,11 +43,11 @@ Product calendar UI, full Nitro contracts, and wheel spec start in **Phases 1–
 
 ## Phase 2 — Native calendar (Gregorian first)
 
-**Status:** Not started
+**Status:** Done (implementation complete; baseline notes captured for device profiling pass)
 
-- [ ] iOS + Android: grid, scrolling/paging as designed in `implem.md`
-- [ ] Header UX: day / month / year modes, today ↔ back, week↔month collapse
-- [ ] RTL: navigation semantics coordinated with `I18nManager` (no double flip)
+- [x] iOS + Android: grid, scrolling/paging as designed in `implem.md`
+- [x] Header UX: day / month / year modes, today ↔ back, week↔month collapse
+- [x] RTL: navigation semantics coordinated with `I18nManager` (no double flip)
 
 ---
 

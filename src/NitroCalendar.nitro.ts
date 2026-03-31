@@ -100,7 +100,7 @@ export interface NitroCalendarMethods extends HybridViewMethods {
   goToToday(): void;
   goToMonth(monthIndex: number): void;
   goToYear(year: number): void;
-  setCollapsedWeekMode(enabled: boolean): void;
+  setCollapsedWeekModeEnabled(enabled: boolean): void;
   setMarkers(markers: DayMarkerCompact[]): void;
 }
 

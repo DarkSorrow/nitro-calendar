@@ -7,6 +7,7 @@ import com.facebook.react.module.model.ReactModuleInfoProvider
 import com.facebook.react.uimanager.ViewManager
 
 import com.margelo.nitro.novasteraoss.nitrocalendar.views.HybridNitroCalendarManager
+import com.margelo.nitro.novasteraoss.nitrocalendar.views.HybridNitroWheelPickerViewManager
 
 class NitroCalendarPackage : BaseReactPackage() {
     override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? {
@@ -18,7 +19,10 @@ class NitroCalendarPackage : BaseReactPackage() {
     }
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
-        return listOf(HybridNitroCalendarManager())
+        return listOf(
+            HybridNitroCalendarManager(),
+            HybridNitroWheelPickerViewManager()
+        )
     }
 
     companion object {
