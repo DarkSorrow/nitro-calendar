@@ -2,10 +2,10 @@ import Foundation
 import UIKit
 import NitroModules
 
-class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
+class HybridNitroCalendar: HybridNitroCalendarSpec {
   var view: UIView
 
-  private let calendarView = UIView()
+  private let calendarView = CalendarRootView()
   private let headerContainer = UIStackView()
   private let leftButton = UIButton(type: .system)
   private let monthButton = UIButton(type: .system)
@@ -17,6 +17,8 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
   private let weekdayStack = UIStackView()
   private let layout = UICollectionViewFlowLayout()
   private lazy var collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+  private lazy var coordinator = CalendarCoordinator(owner: self)
+  private var collectionMinHeightConstraint: NSLayoutConstraint?
 
   private var renderedMode: CalendarViewMode = .day
   private var selectedDate = Date()
@@ -29,6 +31,7 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
   private var isBatchUpdating = false
   private var pendingRefresh = false
   private var refreshScheduled = false
+  private var lastLaidOutSize: CGSize = .zero
   private var calendarEngine: Calendar = {
     var calendar = Calendar(identifier: .gregorian)
     calendar.firstWeekday = 2
@@ -70,11 +73,20 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
   var onVisibleRangeChange: ((_ event: VisibleRangeChangeEvent) -> Void)?
   var onViewModeChange: ((_ event: ViewModeChangeEvent) -> Void)?
 
-  required init() {
+  required override init() {
     layout.minimumLineSpacing = 0
     layout.minimumInteritemSpacing = 0
     calendarView.translatesAutoresizingMaskIntoConstraints = false
     view = calendarView
+    super.init()
+    calendarView.onLayout = { [weak self] size in
+      guard let self else { return }
+      guard size.width > 0, size.height > 0 else { return }
+      if self.lastLaidOutSize != size {
+        self.lastLaidOutSize = size
+        self.performRefreshNow()
+      }
+    }
     setupViewHierarchy()
     setupCollection()
     updateCalendarConfig()
@@ -165,7 +177,13 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
         centerSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
       } else if let button = item as? UIButton {
         button.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-        button.contentEdgeInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        if #available(iOS 15.0, *) {
+          var config = button.configuration ?? UIButton.Configuration.plain()
+          config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
+          button.configuration = config
+        } else {
+          button.contentEdgeInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        }
       }
       headerContainer.addArrangedSubview(item)
     }
@@ -198,25 +216,28 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
       collectionView.trailingAnchor.constraint(equalTo: calendarView.trailingAnchor, constant: -8),
       collectionView.bottomAnchor.constraint(equalTo: calendarView.bottomAnchor, constant: -8)
     ])
+    let minHeight = collectionView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
+    minHeight.isActive = true
+    collectionMinHeightConstraint = minHeight
 
-    leftButton.addTarget(self, action: #selector(onPressPrev), for: .touchUpInside)
-    rightButton.addTarget(self, action: #selector(onPressNext), for: .touchUpInside)
-    monthButton.addTarget(self, action: #selector(onPressMonth), for: .touchUpInside)
-    yearButton.addTarget(self, action: #selector(onPressYear), for: .touchUpInside)
-    todayBackButton.addTarget(self, action: #selector(onPressTodayBack), for: .touchUpInside)
-    collapseButton.addTarget(self, action: #selector(onPressCollapse), for: .touchUpInside)
+    leftButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressPrev), for: .touchUpInside)
+    rightButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressNext), for: .touchUpInside)
+    monthButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressMonth), for: .touchUpInside)
+    yearButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressYear), for: .touchUpInside)
+    todayBackButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressTodayBack), for: .touchUpInside)
+    collapseButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressCollapse), for: .touchUpInside)
   }
 
   private func setupCollection() {
     collectionView.register(CalendarGridCell.self, forCellWithReuseIdentifier: "cell")
-    collectionView.dataSource = self
-    collectionView.delegate = self
+    collectionView.dataSource = coordinator
+    collectionView.delegate = coordinator
 
-    let leftSwipe = UISwipeGestureRecognizer(target: self, action: #selector(onSwipe(_:)))
+    let leftSwipe = UISwipeGestureRecognizer(target: coordinator, action: #selector(CalendarCoordinator.onSwipe(_:)))
     leftSwipe.direction = .left
     collectionView.addGestureRecognizer(leftSwipe)
 
-    let rightSwipe = UISwipeGestureRecognizer(target: self, action: #selector(onSwipe(_:)))
+    let rightSwipe = UISwipeGestureRecognizer(target: coordinator, action: #selector(CalendarCoordinator.onSwipe(_:)))
     rightSwipe.direction = .right
     collectionView.addGestureRecognizer(rightSwipe)
   }
@@ -267,11 +288,18 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
     refreshScheduled = true
     DispatchQueue.main.async {
       self.refreshScheduled = false
-      self.rebuildData()
-      self.refreshHeader()
-      self.collectionView.reloadData()
-      self.emitVisibleRangeIfChanged()
+      self.performRefreshNow()
     }
+  }
+
+  private func performRefreshNow() {
+    rebuildData()
+    refreshHeader()
+    // Ensure collection bounds are up-to-date before reloading so cells can size correctly.
+    calendarView.layoutIfNeeded()
+    collectionView.collectionViewLayout.invalidateLayout()
+    collectionView.reloadData()
+    emitVisibleRangeIfChanged()
   }
 
   private func rebuildData() {
@@ -311,7 +339,10 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
   private func buildMonthItems() {
     dayItems.removeAll(keepingCapacity: true)
     let monthStart = startOfMonth(for: displayedMonthAnchor)
-    guard let monthRange = calendarEngine.range(of: .day, in: .month, for: monthStart) else { return }
+    guard let monthRange = calendarEngine.range(of: .day, in: .month, for: monthStart) else {
+      buildFallbackMonthItems(from: monthStart)
+      return
+    }
 
     let firstWeekdayIndex = calendarEngine.component(.weekday, from: monthStart)
     let leading = (firstWeekdayIndex - calendarEngine.firstWeekday + 7) % 7
@@ -327,6 +358,16 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
       } else {
         break
       }
+    }
+    if dayItems.isEmpty {
+      buildFallbackMonthItems(from: monthStart)
+    }
+  }
+
+  private func buildFallbackMonthItems(from monthStart: Date) {
+    for offset in 0..<42 {
+      guard let date = calendarEngine.date(byAdding: .day, value: offset, to: monthStart) else { continue }
+      dayItems.append(makeDayItem(for: date, inVisibleMonth: true))
     }
   }
 
@@ -413,8 +454,10 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
       let nextEnd = calendarEngine.date(byAdding: .second, value: -1, to: next)
     else { return }
 
-    let range = (msFromDate(prev), msFromDate(nextEnd))
-    if let lastVisibleRange, abs(lastVisibleRange.0 - range.0) < 1, abs(lastVisibleRange.1 - range.1) < 1 {
+    let range: (Double, Double) = (msFromDate(prev), msFromDate(nextEnd))
+    if let lastVisibleRange,
+       Swift.abs(lastVisibleRange.0 - range.0) < 1,
+       Swift.abs(lastVisibleRange.1 - range.1) < 1 {
       return
     }
     lastVisibleRange = range
@@ -439,26 +482,26 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
     requestRefresh()
   }
 
-  @objc private func onPressPrev() {
+  fileprivate func onPressPrev() {
     let forward = isRTL
     shiftTimeline(forward: forward)
   }
 
-  @objc private func onPressNext() {
+  fileprivate func onPressNext() {
     let forward = !isRTL
     shiftTimeline(forward: forward)
   }
 
-  @objc private func onPressMonth() {
+  fileprivate func onPressMonth() {
     applyViewMode(.month, emit: true)
   }
 
-  @objc private func onPressYear() {
+  fileprivate func onPressYear() {
     yearSliceStart = computeYearSliceStart(for: displayedMonthAnchor)
     applyViewMode(.year, emit: true)
   }
 
-  @objc private func onPressTodayBack() {
+  fileprivate func onPressTodayBack() {
     if renderedMode == .month || renderedMode == .year {
       applyViewMode(collapsedWeekMode ? .week : .day, emit: true)
       return
@@ -466,24 +509,24 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
     try? goToToday()
   }
 
-  @objc private func onPressCollapse() {
+  fileprivate func onPressCollapse() {
     collapsedWeekMode.toggle()
   }
 
-  @objc private func onSwipe(_ recognizer: UISwipeGestureRecognizer) {
+  fileprivate func onSwipe(_ recognizer: UISwipeGestureRecognizer) {
     let isForwardSwipe = recognizer.direction == .left
     let forward = isRTL ? !isForwardSwipe : isForwardSwipe
     shiftTimeline(forward: forward)
   }
 
-  func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+  fileprivate func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
     if renderedMode == .month || renderedMode == .year {
       return pickerItems.count
     }
     return dayItems.count
   }
 
-  func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+  fileprivate func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
     guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "cell", for: indexPath) as? CalendarGridCell else {
       return UICollectionViewCell()
     }
@@ -529,7 +572,7 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
     return cell
   }
 
-  func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+  fileprivate func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
     if renderedMode == .month {
       let month = indexPath.item + 1
       try? goToMonth(monthIndex: Double(month - 1))
@@ -552,11 +595,14 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
     requestRefresh()
   }
 
-  func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
+  fileprivate func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
     let spacing: CGFloat = CGFloat(appearance.spacing ?? 0)
-    let width = collectionView.bounds.width
+    let fallbackWidth = max(0, UIScreen.main.bounds.width - 32)
+    let measuredWidth = max(collectionView.bounds.width, max(0, calendarView.bounds.width - 16))
+    let width = measuredWidth > 1 ? measuredWidth : fallbackWidth
     let columns: CGFloat = (renderedMode == .month || renderedMode == .year) ? 3 : 7
-    let itemWidth = floor((width - (columns - 1) * spacing) / columns)
+    let rawWidth = (width - (columns - 1) * spacing) / columns
+    let itemWidth = max(1, floor(rawWidth))
     let height: CGFloat
     if renderedMode == .month || renderedMode == .year {
       height = max(36, CGFloat(appearance.rowHeight ?? 44))
@@ -664,6 +710,68 @@ class HybridNitroCalendar: HybridNitroCalendarSpec, UICollectionViewDataSource, 
       accessibilityPrev: nil,
       accessibilityNext: nil
     )
+  }
+}
+
+private final class CalendarRootView: UIView {
+  var onLayout: ((CGSize) -> Void)?
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    onLayout?(bounds.size)
+  }
+}
+
+private final class CalendarCoordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
+  weak var owner: HybridNitroCalendar?
+
+  init(owner: HybridNitroCalendar) {
+    self.owner = owner
+    super.init()
+  }
+
+  @objc func onPressPrev() {
+    owner?.onPressPrev()
+  }
+
+  @objc func onPressNext() {
+    owner?.onPressNext()
+  }
+
+  @objc func onPressMonth() {
+    owner?.onPressMonth()
+  }
+
+  @objc func onPressYear() {
+    owner?.onPressYear()
+  }
+
+  @objc func onPressTodayBack() {
+    owner?.onPressTodayBack()
+  }
+
+  @objc func onPressCollapse() {
+    owner?.onPressCollapse()
+  }
+
+  @objc func onSwipe(_ recognizer: UISwipeGestureRecognizer) {
+    owner?.onSwipe(recognizer)
+  }
+
+  func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+    return owner?.collectionView(collectionView, numberOfItemsInSection: section) ?? 0
+  }
+
+  func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+    return owner?.collectionView(collectionView, cellForItemAt: indexPath) ?? UICollectionViewCell()
+  }
+
+  func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+    owner?.collectionView(collectionView, didSelectItemAt: indexPath)
+  }
+
+  func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
+    return owner?.collectionView(collectionView, layout: collectionViewLayout, sizeForItemAt: indexPath) ?? .zero
   }
 }
 
