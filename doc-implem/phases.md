@@ -53,10 +53,19 @@ Product calendar UI, full Nitro contracts, and wheel spec start in **Phases 1–
 
 ## Phase 3 — Native wheel + datetime composition
 
-**Status:** Not started
+**Status:** In progress (native wheel engine implemented; time-mode composition wired in example)
 
-- [ ] Cross-platform wheel engine (snap, inertia parity)
-- [ ] Time modes (24h / 12h) and composed layout: calendar above, wheels below
+- [x] iOS: custom `UICollectionView`-based wheel — center snap via `scrollViewWillEndDragging`, `.fast` deceleration, loop via virtual 1000× item count
+- [x] Android: custom `RecyclerView` + `LinearSnapHelper` wheel — fling scaled 0.7×, `LinearSmoothScroller` centering, loop via virtual 1000× item count
+- [x] `onSettled` fires exactly once per gesture end (iOS: `didEndDecelerating`/`didEndDragging`; Android: `SCROLL_STATE_IDLE`)
+- [x] `onValueChange` throttled — fires only on index change, not per pixel
+- [x] `loop` prop: seamless wrap-around on both platforms
+- [x] `visibleCount` + `itemHeight` drive layout and content insets/padding
+- [x] `scrollTo(index)` animated on both platforms
+- [x] `WheelPickerAppearance` applied (colors, font, divider lines)
+- [x] Parity test screen in `example/` — 24h/12h wheels, loop on/off, event log
+- [ ] Device profiling pass (Instruments / Android Profiler)
+- [ ] Cross-platform parity table (§3.5) filled after device testing
 
 ---
 
