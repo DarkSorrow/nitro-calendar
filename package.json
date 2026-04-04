@@ -175,5 +175,7 @@
     "version": "0.57.2"
   },
   "dependencies": {
+    "eslint-plugin-ft-flow": "^3.0.11",
+    "eslint-plugin-react-native": "^5.0.0"
   }
 }

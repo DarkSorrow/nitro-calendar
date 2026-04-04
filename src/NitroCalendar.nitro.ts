@@ -5,7 +5,9 @@ import type {
 } from 'react-native-nitro-modules';
 
 export type CalendarViewMode = 'day' | 'month' | 'year' | 'week';
-export type FontWeight = '400' | '500' | '600' | '700';
+
+/** CSS font-weight numeric value; use 400, 500, 600, or 700 (avoids Nitro string-union → broken Swift enum codegen). */
+export type FontWeight = number;
 
 export type CalendarType =
   | 'gregorian'

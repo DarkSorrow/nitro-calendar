@@ -1,12 +1,17 @@
 package com.margelo.nitro.novasteraoss.nitrocalendar
 
+import android.content.Context
 import android.graphics.Color
 import android.icu.util.Calendar
 import android.icu.util.TimeZone
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
+import android.view.ViewTreeObserver
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.graphics.toColorInt
@@ -18,6 +23,92 @@ import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+
+/**
+ * Day/week grid: intercepts dominant horizontal drags & horizontal flings so month navigation
+ * is not eaten by [RecyclerView] scroll handling. Picker modes delegate to default behavior.
+ */
+private class CalendarGridRecyclerView(
+  context: Context,
+  private val isPickerMode: () -> Boolean,
+  private val isRtl: () -> Boolean,
+  private val onSwipe: (forward: Boolean) -> Unit,
+) : RecyclerView(context) {
+
+  private var downX = 0f
+  private var downY = 0f
+  private var horizontalDrag = false
+  private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+  private val swipeMinPx = max(36, (40 * context.resources.displayMetrics.density).toInt())
+  private val minFlingVx =
+    min(380, ViewConfiguration.get(context).scaledMinimumFlingVelocity * 2)
+
+  private val flingDetector =
+    GestureDetector(
+      context,
+      object : GestureDetector.SimpleOnGestureListener() {
+        override fun onFling(
+          e1: MotionEvent?,
+          e2: MotionEvent,
+          velocityX: Float,
+          velocityY: Float,
+        ): Boolean {
+          if (isPickerMode()) return false
+          if (e1 == null) return false
+          if (abs(velocityY) > abs(velocityX) * 1.08f) return false
+          if (abs(velocityX) < minFlingVx) return false
+          val forward = velocityX < 0
+          onSwipe(if (isRtl()) !forward else forward)
+          return true
+        }
+      },
+    )
+
+  override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+    if (isPickerMode()) return super.onInterceptTouchEvent(e)
+    when (e.actionMasked) {
+      MotionEvent.ACTION_DOWN -> {
+        downX = e.x
+        downY = e.y
+        horizontalDrag = false
+      }
+      MotionEvent.ACTION_MOVE -> {
+        val dx = abs(e.x - downX)
+        val dy = abs(e.y - downY)
+        if (!horizontalDrag && dx > touchSlop && dx > dy * 0.95f) {
+          horizontalDrag = true
+          parent?.requestDisallowInterceptTouchEvent(true)
+        }
+      }
+    }
+    return if (horizontalDrag) true else super.onInterceptTouchEvent(e)
+  }
+
+  override fun onTouchEvent(e: MotionEvent): Boolean {
+    if (isPickerMode()) return super.onTouchEvent(e)
+    flingDetector.onTouchEvent(e)
+    if (horizontalDrag) {
+      when (e.actionMasked) {
+        MotionEvent.ACTION_MOVE -> return true
+        MotionEvent.ACTION_UP -> {
+          val dx = e.x - downX
+          val dy = e.y - downY
+          if (abs(dx) >= swipeMinPx && abs(dx) >= abs(dy) * 0.85f) {
+            val forward = dx < 0
+            onSwipe(if (isRtl()) !forward else forward)
+          }
+          horizontalDrag = false
+          return true
+        }
+        MotionEvent.ACTION_CANCEL -> {
+          horizontalDrag = false
+          return true
+        }
+      }
+    }
+    return super.onTouchEvent(e)
+  }
+}
 
 @DoNotStrip
 class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitroCalendarSpec() {
@@ -37,7 +128,13 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   private val nextButton = Button(context)
   private val collapseButton = Button(context)
   private val weekdayRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-  private val recycler = RecyclerView(context)
+  private val recycler: RecyclerView =
+    CalendarGridRecyclerView(
+      context,
+      isPickerMode = { renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR },
+      isRtl = { isRTL },
+      onSwipe = { forward -> shiftTimeline(forward) },
+    )
   private val dayLayoutManager = GridLayoutManager(context, 7)
   private val pickerLayoutManager = GridLayoutManager(context, 3)
 
@@ -54,19 +151,35 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   private var pickerItems: List<String> = emptyList()
   private var markersByDayStart = mutableMapOf<Long, IntArray>()
   private var lastVisibleRange: Pair<Double, Double>? = null
-  private var touchStartX = 0f
+  private var lastDayGridLayoutSize: Pair<Int, Int> = 0 to 0
   private var isBatchUpdating = false
   private var pendingRefresh = false
   private var refreshScheduled = false
 
+  private val dayGridGlobalLayoutListener =
+    ViewTreeObserver.OnGlobalLayoutListener {
+      if (renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR) return@OnGlobalLayoutListener
+      val w = recycler.width
+      val h = recycler.height
+      if (w <= 0 || h <= 0 || root.height <= 0) return@OnGlobalLayoutListener
+      val size = w to h
+      if (size != lastDayGridLayoutSize) {
+        lastDayGridLayoutSize = size
+        dayAdapter.notifyDataSetChanged()
+      }
+    }
+
   override var selectedTimestampMs: Double = System.currentTimeMillis().toDouble()
     set(value) {
+      val timelineChanged = abs(value - field) > 0.5
       field = value
       selectedCalendar = calendarFor(value)
-      if (renderedMode == CalendarViewMode.DAY || renderedMode == CalendarViewMode.WEEK) {
+      if (timelineChanged && (renderedMode == CalendarViewMode.DAY || renderedMode == CalendarViewMode.WEEK)) {
         displayedMonthAnchor = (selectedCalendar.clone() as Calendar).startOfMonth()
       }
-      requestRefresh()
+      if (timelineChanged) {
+        requestRefresh()
+      }
     }
 
   override var initialTimestampMs: Double? = null
@@ -130,6 +243,39 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
     applyAppearance()
     refreshWeekdayRow()
     requestRefresh()
+    root.post {
+      runRefreshUiNow()
+    }
+    root.addOnAttachStateChangeListener(
+      object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) {
+          v.post {
+            lastDayGridLayoutSize = 0 to 0
+            runRefreshUiNow()
+            root.requestLayout()
+            recycler.requestLayout()
+            recycler.post {
+              if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR &&
+                recycler.width > 0 && recycler.height > 0) {
+                dayAdapter.notifyDataSetChanged()
+              }
+            }
+          }
+        }
+
+        override fun onViewDetachedFromWindow(v: View) = Unit
+      },
+    )
+    root.viewTreeObserver.addOnGlobalLayoutListener(dayGridGlobalLayoutListener)
+  }
+
+  private fun runRefreshUiNow() {
+    if (isBatchUpdating) {
+      pendingRefresh = true
+      return
+    }
+    refreshScheduled = false
+    refreshUi()
   }
 
   override fun goToToday() {
@@ -188,6 +334,14 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
       pendingRefresh = false
       requestRefresh()
     }
+    root.post {
+      lastDayGridLayoutSize = 0 to 0
+      runRefreshUiNow()
+      if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR &&
+        recycler.width > 0 && recycler.height > 0) {
+        dayAdapter.notifyDataSetChanged()
+      }
+    }
   }
 
   private fun setupView() {
@@ -223,21 +377,9 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
     recycler.layoutManager = dayLayoutManager
     recycler.adapter = dayAdapter
     recycler.itemAnimator = null
-    recycler.setHasFixedSize(true)
+    recycler.setHasFixedSize(false)
     recycler.overScrollMode = View.OVER_SCROLL_NEVER
-    recycler.setOnTouchListener { _, event ->
-      when (event.action) {
-        MotionEvent.ACTION_DOWN -> touchStartX = event.x
-        MotionEvent.ACTION_UP -> {
-          val dx = event.x - touchStartX
-          if (abs(dx) > 20.dp().toFloat()) {
-            val swipeForward = dx < 0
-            shiftTimeline(forward = if (isRTL) !swipeForward else swipeForward)
-          }
-        }
-      }
-      false
-    }
+    recycler.minimumHeight = (280 * context.resources.displayMetrics.density).toInt()
 
     repeat(7) {
       val label = TextView(context)
@@ -308,6 +450,16 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
       }
       dayAdapter.submitItems(dayItems, appearance, strings)
       emitVisibleRangeIfNeeded()
+      recycler.post {
+        if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR) {
+          val w = recycler.width
+          val h = recycler.height
+          if (w > 0 && h > 0) {
+            lastDayGridLayoutSize = w to h
+            dayAdapter.notifyDataSetChanged()
+          }
+        }
+      }
     }
     refreshWeekdayRow()
   }
@@ -596,16 +748,16 @@ private class DayAdapter(
   override fun getItemCount(): Int = items.size
 
   override fun onBindViewHolder(holder: DayViewHolder, position: Int) {
+    val app = appearance ?: return
     val item = items[position]
-    holder.bind(item, appearance ?: return)
+    holder.bind(item, app)
     holder.itemView.setOnClickListener { onPress(item) }
   }
 }
 
-private class DayViewHolder private constructor(view: View) : RecyclerView.ViewHolder(view) {
-  private val container = view as LinearLayout
-  private val title = container.getChildAt(0) as TextView
-  private val dotsRow = container.getChildAt(1) as LinearLayout
+private class DayViewHolder private constructor(private val frame: FrameLayout) : RecyclerView.ViewHolder(frame) {
+  private val title = frame.getChildAt(0) as TextView
+  private val dotsRow = frame.getChildAt(1) as LinearLayout
 
   fun bind(item: DayItem, appearance: CalendarAppearance) {
     val textColor = when {
@@ -633,19 +785,38 @@ private class DayViewHolder private constructor(view: View) : RecyclerView.ViewH
   companion object {
     fun create(parent: android.view.ViewGroup): DayViewHolder {
       val context = parent.context
-      val column = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER
-        minimumHeight = (40 * context.resources.displayMetrics.density).toInt()
+      val density = context.resources.displayMetrics.density
+      val frame = FrameLayout(context).apply {
+        minimumHeight = (44 * density).toInt()
       }
-      val title = TextView(context).apply { gravity = Gravity.CENTER }
+      val title = TextView(context).apply {
+        gravity = Gravity.CENTER
+        includeFontPadding = false
+        textSize = 15f
+      }
       val dots = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
       }
-      column.addView(title, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-      column.addView(dots, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-      return DayViewHolder(column)
+      frame.addView(
+        title,
+        FrameLayout.LayoutParams(
+          FrameLayout.LayoutParams.MATCH_PARENT,
+          FrameLayout.LayoutParams.MATCH_PARENT,
+          Gravity.CENTER,
+        ),
+      )
+      frame.addView(
+        dots,
+        FrameLayout.LayoutParams(
+          FrameLayout.LayoutParams.WRAP_CONTENT,
+          FrameLayout.LayoutParams.WRAP_CONTENT,
+          Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+        ).apply {
+          bottomMargin = (2 * density).toInt()
+        },
+      )
+      return DayViewHolder(frame)
     }
   }
 }

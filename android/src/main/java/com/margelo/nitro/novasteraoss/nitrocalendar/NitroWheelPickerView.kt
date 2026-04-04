@@ -6,6 +6,7 @@ import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -13,6 +14,7 @@ import androidx.recyclerview.widget.LinearSnapHelper
 import androidx.recyclerview.widget.RecyclerView
 import com.facebook.proguard.annotations.DoNotStrip
 import com.facebook.react.uimanager.ThemedReactContext
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -46,35 +48,49 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
   // MARK: - Adapter (inner class for direct access to outer state)
 
   private inner class WheelAdapter : RecyclerView.Adapter<WheelAdapter.VH>() {
-    inner class VH(val tv: TextView) : RecyclerView.ViewHolder(tv)
+    inner class VH(val row: FrameLayout, val tv: TextView) : RecyclerView.ViewHolder(row)
 
     override fun getItemCount(): Int = totalItems
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
       val tv = TextView(parent.context).apply {
         gravity = Gravity.CENTER
-        layoutParams = RecyclerView.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT, itemHeightPx)
+        layoutParams = FrameLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.MATCH_PARENT,
+        )
       }
-      return VH(tv)
+      val row = FrameLayout(parent.context).apply {
+        clipChildren = false
+        layoutParams = RecyclerView.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          itemHeightPx,
+        )
+        addView(tv)
+      }
+      return VH(row, tv)
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
       val values = _values
-      if (values.isEmpty()) { holder.tv.text = ""; return }
+      if (values.isEmpty()) {
+        holder.tv.text = ""
+        resetWheelTransforms(holder.row)
+        return
+      }
       val logical = position % values.size
       val isSelected = logical == currentIndex
 
+      resetWheelTransforms(holder.row)
+      holder.row.layoutParams =
+        RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, itemHeightPx)
       holder.tv.text = values[logical]
       holder.tv.textSize = resolvedFontSizeSp
       holder.tv.typeface = resolvedTypeface
       holder.tv.setTextColor(if (isSelected) resolvedSelectedColor else resolvedNormalColor)
-      holder.tv.alpha = if (isSelected) 1f else 0.5f
+      holder.tv.alpha = 1f
       holder.tv.setBackgroundColor(
         if (isSelected && resolvedSelectedBg != null) resolvedSelectedBg!! else Color.TRANSPARENT)
-      // Update height in case itemHeight changed
-      holder.tv.layoutParams = RecyclerView.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, itemHeightPx)
     }
 
     /** Rebind only the currently visible items — cheap path for selection changes. */
@@ -135,6 +151,7 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
       recycler.post {
         adapter.rebindAll()
         jumpToIndex(currentIndex, animated = false)
+        scheduleApplyWheel()
       }
     }
 
@@ -184,7 +201,9 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
     // RecyclerView
     recycler.layoutManager = rvLayout
     recycler.adapter = adapter
+    recycler.itemAnimator = null
     recycler.clipToPadding = false
+    recycler.clipChildren = false
     recycler.overScrollMode = View.OVER_SCROLL_NEVER
     snapHelper.attachToRecyclerView(recycler)
 
@@ -213,21 +232,36 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
 
       override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
         if (_values.isEmpty()) return
-        val snapView = snapHelper.findSnapView(rvLayout) ?: return
-        val pos = rvLayout.getPosition(snapView)
-        if (pos == RecyclerView.NO_POSITION) return
-        val logical = pos % _values.size
-        if (logical != currentIndex) {
-          currentIndex = logical
-          // Direct view update — safe during layout/scroll, no adapter notification
-          updateVisibleItemAppearances()
-          emitValueChange(logical)
+        val snapView = snapHelper.findSnapView(rvLayout)
+        if (snapView != null) {
+          val pos = rvLayout.getPosition(snapView)
+          if (pos != RecyclerView.NO_POSITION) {
+            val logical = pos % _values.size
+            if (logical != currentIndex) {
+              currentIndex = logical
+              updateVisibleItemAppearances()
+              emitValueChange(logical)
+            }
+          }
         }
+        applyWheelPerspectiveToVisible()
       }
     })
 
     updatePaddingAndIndicator()
     applyAppearance()
+
+    val globalWheelLayoutListener =
+      object : ViewTreeObserver.OnGlobalLayoutListener {
+        override fun onGlobalLayout() {
+          if (recycler.width <= 0 || recycler.height <= 0) return
+          recycler.viewTreeObserver.removeOnGlobalLayoutListener(this)
+          scheduleApplyWheel()
+        }
+      }
+    recycler.viewTreeObserver.addOnGlobalLayoutListener(globalWheelLayoutListener)
+
+    recycler.post { scheduleApplyWheel() }
   }
 
   // MARK: - Spec method
@@ -239,11 +273,22 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
     recycler.post {
       commitSelection(logical, emitSettled = false)
       jumpToIndex(logical, animated = true)
-      // onSettled fires when RecyclerView reaches SCROLL_STATE_IDLE
+      scheduleApplyWheel()
     }
   }
 
   // MARK: - Private helpers
+
+  /** Run after layout so row heights / pivots are non-zero (first paint + Fabric). */
+  private fun scheduleApplyWheel() {
+    recycler.post {
+      applyWheelPerspectiveToVisible()
+      recycler.post {
+        applyWheelPerspectiveToVisible()
+        recycler.postDelayed({ applyWheelPerspectiveToVisible() }, 48)
+      }
+    }
+  }
 
   private fun commitSelection(logical: Int, emitSettled: Boolean) {
     currentIndex = logical
@@ -253,24 +298,69 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
     // Post adapter notification — RecyclerView forbids notifyItem* calls during any
     // layout/scroll pass, including SCROLL_STATE_IDLE transitions inside
     // consumePendingUpdateOperations. Posting defers to the next looper iteration.
-    recycler.post { adapter.refreshVisible() }
+    recycler.post {
+      adapter.refreshVisible()
+      scheduleApplyWheel()
+    }
     if (emitSettled) emitSettled(logical)
   }
 
+  private fun resetWheelTransforms(v: View) {
+    val ph = (if (v.height > 0) v.height else itemHeightPx) / 2f
+    val pw = (if (v.width > 0) v.width else max(1, recycler.width)) / 2f
+    v.cameraDistance = 12000f * v.resources.displayMetrics.density
+    v.pivotY = ph
+    v.pivotX = pw
+    v.rotationX = 0f
+    v.scaleX = 1f
+    v.scaleY = 1f
+    v.translationZ = 0f
+  }
+
+  /** iOS-style drum: distance from vertical center → rotationX, scale, alpha, translationZ. */
+  private fun applyWheelPerspectiveToVisible() {
+    if (_values.isEmpty() || itemHeightPx <= 0 || recycler.height <= 0) return
+    val focal = recycler.height / 2f
+    val camDist = 12000f * context.resources.displayMetrics.density
+    for (i in 0 until rvLayout.childCount) {
+      val child = rvLayout.getChildAt(i) ?: continue
+      val h = if (child.height > 0) child.height else itemHeightPx
+      val w = if (child.width > 0) child.width else max(1, recycler.width)
+      val childMid = child.top + h / 2f
+      val d = (childMid - focal) / itemHeightPx.toFloat()
+      val ad = abs(d)
+      val wheelAlpha = max(0.22f, 1f - 0.34f * min(ad, 2.9f))
+      val scale = max(0.76f, 1f - 0.125f * min(ad, 2.9f))
+      val rot = (-d * 22f).coerceIn(-35.5f, 35.5f)
+      child.cameraDistance = camDist
+      child.pivotY = h / 2f
+      child.pivotX = w / 2f
+      child.rotationX = rot
+      child.scaleX = scale
+      child.scaleY = scale
+      val pos = rvLayout.getPosition(child)
+      if (pos == RecyclerView.NO_POSITION) continue
+      val logical = pos % _values.size
+      val isSelected = logical == currentIndex
+      val emphasis = if (isSelected) 1f else 0.88f
+      child.alpha = wheelAlpha * emphasis
+      child.translationZ = (8f - ad * 1.2f).coerceAtLeast(0f)
+    }
+  }
+
   /**
-   * Directly update the text color / alpha of visible children without going through the
-   * adapter notification path. Safe to call during a layout or scroll pass.
-   * ViewHolder root views are TextViews (see WheelAdapter.VH).
+   * Directly update the text color / background of visible children (safe during scroll).
+   * Alpha / 3D come from [applyWheelPerspectiveToVisible].
    */
   private fun updateVisibleItemAppearances() {
     for (i in 0 until rvLayout.childCount) {
-      val child = rvLayout.getChildAt(i) as? TextView ?: continue
-      val pos = rvLayout.getPosition(child)
+      val row = rvLayout.getChildAt(i) as? FrameLayout ?: continue
+      val child = row.getChildAt(0) as? TextView ?: continue
+      val pos = rvLayout.getPosition(row)
       if (pos == RecyclerView.NO_POSITION || _values.isEmpty()) continue
       val childLogical = pos % _values.size
       val isSelected = childLogical == currentIndex
       child.setTextColor(if (isSelected) resolvedSelectedColor else resolvedNormalColor)
-      child.alpha = if (isSelected) 1f else 0.5f
       child.setBackgroundColor(
         if (isSelected && resolvedSelectedBg != null) resolvedSelectedBg!! else Color.TRANSPARENT)
     }
@@ -305,9 +395,8 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
       scroller.targetPosition = targetPos
       rvLayout.startSmoothScroll(scroller)
     } else {
-      // scrollToPositionWithOffset: top of targetPos aligns with `offset` from RecyclerView top.
-      // To center the item: offset = halfVisible * itemHeightPx
       rvLayout.scrollToPositionWithOffset(targetPos, halfVisible * itemHeightPx)
+      scheduleApplyWheel()
     }
   }
 
@@ -325,6 +414,7 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
       topMargin = centerTop + itemHeightPx
       bottomLine.layoutParams = this
     }
+    recycler.post { scheduleApplyWheel() }
   }
 
   private fun applyAppearance() {
@@ -345,6 +435,7 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
     bottomLine.setBackgroundColor(divColor)
 
     adapter.rebindAll()
+    recycler.post { scheduleApplyWheel() }
   }
 
   private fun emitValueChange(logical: Int) {
@@ -359,10 +450,8 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
   }
 
   private fun resolveTypeface(ap: WheelPickerAppearance?): Typeface {
-    val style = when (ap?.fontWeight) {
-      FontWeight._700 -> Typeface.BOLD
-      else -> Typeface.NORMAL
-    }
+    val w = ap?.fontWeight ?: 400.0
+    val style = if (w >= 600.0) Typeface.BOLD else Typeface.NORMAL
     val family = ap?.fontFamily
     return if (!family.isNullOrBlank()) {
       try { Typeface.create(family, style) } catch (_: Exception) { Typeface.defaultFromStyle(style) }

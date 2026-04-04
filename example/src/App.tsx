@@ -29,7 +29,20 @@ const calendarAppearance: CalendarAppearance = {
 };
 
 const calendarStrings: CalendarStrings = {
-  monthNamesShort: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+  monthNamesShort: [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ],
   weekdayNamesMin: ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'],
   headerToday: 'Today',
   headerBack: 'Back',
@@ -45,16 +58,24 @@ const wheelAppearance: WheelPickerAppearance = {
 
 // ── Value arrays ────────────────────────────────────────────────────────────
 
-const HOURS_24 = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
-const HOURS_12 = Array.from({ length: 12 }, (_, i) => String(i === 0 ? 12 : i).padStart(2, '0'));
-const MINUTES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
+const HOURS_24 = Array.from({ length: 24 }, (_, i) =>
+  String(i).padStart(2, '0')
+);
+const HOURS_12 = Array.from({ length: 12 }, (_, i) =>
+  String(i === 0 ? 12 : i).padStart(2, '0')
+);
+const MINUTES = Array.from({ length: 60 }, (_, i) =>
+  String(i).padStart(2, '0')
+);
 const PERIOD = ['AM', 'PM'];
 const STANDALONE_VALUES = ['00', '15', '30', '45'];
 
 // ── Main app ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [selectedTimestampMs, setSelectedTimestampMs] = useState(() => Date.now());
+  const [selectedTimestampMs, setSelectedTimestampMs] = useState(() =>
+    Date.now()
+  );
   const [collapsedWeekMode, setCollapsedWeekMode] = useState(false);
   const [use24h, setUse24h] = useState(true);
   const [settledLog, setSettledLog] = useState<string[]>([]);
@@ -64,8 +85,12 @@ export default function App() {
   const minuteRef = useRef<NitroWheelPickerViewMethods | null>(null);
 
   const selectedLabel = useMemo(
-    () => new Date(selectedTimestampMs).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' }),
-    [selectedTimestampMs],
+    () =>
+      new Date(selectedTimestampMs).toLocaleString('en-US', {
+        dateStyle: 'full',
+        timeStyle: 'short',
+      }),
+    [selectedTimestampMs]
   );
 
   const now = new Date();
@@ -98,7 +123,9 @@ export default function App() {
             calendarRef.current?.setCollapsedWeekModeEnabled(next);
           }}
         >
-          <Text style={styles.btnText}>{collapsedWeekMode ? 'Expand' : 'Week'}</Text>
+          <Text style={styles.btnText}>
+            {collapsedWeekMode ? 'Expand' : 'Week'}
+          </Text>
         </Pressable>
       </View>
 
@@ -119,7 +146,9 @@ export default function App() {
         appearanceKey="theme-default-v1"
         strings={calendarStrings}
         stringsKey="en-US-v1"
-        onDateChange={callback(({ timestampMs }) => setSelectedTimestampMs(timestampMs))}
+        onDateChange={callback(({ timestampMs }) =>
+          setSelectedTimestampMs(timestampMs)
+        )}
         onVisibleRangeChange={callback(() => {})}
         onViewModeChange={callback(() => {})}
         style={styles.calendar}
@@ -133,13 +162,17 @@ export default function App() {
           style={[styles.btn, !use24h && styles.btnOutline]}
           onPress={() => setUse24h(true)}
         >
-          <Text style={[styles.btnText, !use24h && styles.btnTextOutline]}>24h</Text>
+          <Text style={[styles.btnText, !use24h && styles.btnTextOutline]}>
+            24h
+          </Text>
         </Pressable>
         <Pressable
           style={[styles.btn, use24h && styles.btnOutline]}
           onPress={() => setUse24h(false)}
         >
-          <Text style={[styles.btnText, use24h && styles.btnTextOutline]}>12h</Text>
+          <Text style={[styles.btnText, use24h && styles.btnTextOutline]}>
+            12h
+          </Text>
         </Pressable>
         <Pressable
           style={styles.btn}
@@ -250,7 +283,9 @@ export default function App() {
         <View style={styles.logBox}>
           <Text style={styles.logTitle}>onSettled log</Text>
           {settledLog.map((line, i) => (
-            <Text key={i} style={styles.logLine}>{line}</Text>
+            <Text key={i} style={styles.logLine}>
+              {line}
+            </Text>
           ))}
         </View>
       )}
