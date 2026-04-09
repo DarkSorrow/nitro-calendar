@@ -103,7 +103,12 @@ export default function App() {
   }
 
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.container}
+      scrollEnabled={true}
+      nestedScrollEnabled={false}
+    >
       {/* ── Calendar section ── */}
       <Text style={styles.sectionTitle}>Calendar (Phase 2)</Text>
       <Text style={styles.subtitle}>{selectedLabel}</Text>

@@ -1,137 +1,139 @@
 import Foundation
 import UIKit
+import SwiftUI
 import NitroModules
+
+// MARK: - CalendarViewModel
+
+@MainActor
+final class CalendarViewModel: ObservableObject {
+  @Published var selectedTimestampMs: Double = Date().timeIntervalSince1970 * 1000
+  @Published var mode: CalendarViewMode = .day
+  @Published var collapsedWeekMode: Bool = false
+  @Published var isRTL: Bool = false
+  @Published var appearance: CalendarAppearance = HybridNitroCalendar.defaultAppearance()
+  @Published var strings: CalendarStrings = HybridNitroCalendar.defaultStrings()
+  @Published var pageIndex: Int = 10_000
+  @Published var yearSliceStart: Int = Calendar.current.component(.year, from: Date()) - 6
+  @Published var weekIndex: Int = 0  // week row index within the current month page
+  @Published var minTimestampMs: Double? = nil
+  @Published var maxTimestampMs: Double? = nil
+  @Published var weekStartsOn: Int = 1
+  @Published var markers: [Int64: [Int]] = [:]
+  var calendarEngine: Foundation.Calendar = {
+    var c = Foundation.Calendar(identifier: .gregorian)
+    c.firstWeekday = 2
+    return c
+  }()
+
+  var onDateChange: ((DateChangeEvent) -> Void)?
+  var onVisibleRangeChange: ((VisibleRangeChangeEvent) -> Void)?
+  var onViewModeChange: ((ViewModeChangeEvent) -> Void)?
+}
+
+// MARK: - HybridNitroCalendar
 
 class HybridNitroCalendar: HybridNitroCalendarSpec {
   var view: UIView
 
-  private let calendarView = CalendarRootView()
-  private let headerContainer = UIStackView()
-  private let leftButton = UIButton(type: .system)
-  private let monthButton = UIButton(type: .system)
-  private let yearButton = UIButton(type: .system)
-  private let centerSpacer = UIView()
-  private let todayBackButton = UIButton(type: .system)
-  private let rightButton = UIButton(type: .system)
-  private let collapseButton = UIButton(type: .system)
-  private let weekdayStack = UIStackView()
-  private let layout = UICollectionViewFlowLayout()
-  private lazy var collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
-  private lazy var coordinator = CalendarCoordinator(owner: self)
-  private var collectionMinHeightConstraint: NSLayoutConstraint?
-
-  private var renderedMode: CalendarViewMode = .day
-  private var selectedDate = Date()
-  private var displayedMonthAnchor = Date()
-  private var yearSliceStart = 2000
-  private var dayItems: [DayItem] = []
-  private var pickerItems: [String] = []
-  private var markerByDayStartMs: [Int64: [Int]] = [:]
-  private var lastVisibleRange: (Double, Double)?
-  private var isBatchUpdating = false
-  private var pendingRefresh = false
-  private var refreshScheduled = false
-  private var lastLaidOutSize: CGSize = .zero
-  private var calendarEngine: Calendar = {
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.firstWeekday = 2
-    return calendar
-  }()
+  private let container = UIView()
+  private let vm = CalendarViewModel()
+  private var hostingController: UIViewController?
 
   var selectedTimestampMs: Double = Date().timeIntervalSince1970 * 1000 {
-    didSet {
-      selectedDate = dateFromMs(selectedTimestampMs)
-      if renderedMode == .day || renderedMode == .week {
-        displayedMonthAnchor = startOfMonth(for: selectedDate)
-      }
-      requestRefresh()
-    }
+    didSet { vm.selectedTimestampMs = selectedTimestampMs }
   }
   var initialTimestampMs: Double?
   var calendarType: CalendarType = .gregorian
-  var isRTL: Bool = false { didSet { refreshHeader() } }
-  var timeZoneId: String? { didSet { updateCalendarConfig(); requestRefresh() } }
-  var viewMode: CalendarViewMode = .day { didSet { applyViewMode(viewMode, emit: true) } }
-  var collapsedWeekMode: Bool = false { didSet { applyCollapsedMode(emit: true) } }
+  var isRTL: Bool = false { didSet { vm.isRTL = isRTL } }
+  var timeZoneId: String? { didSet { updateCalendarEngine() } }
+  var viewMode: CalendarViewMode = .day { didSet { vm.mode = viewMode; vm.onViewModeChange?(ViewModeChangeEvent(mode: viewMode)) } }
+  var collapsedWeekMode: Bool = false { didSet { vm.collapsedWeekMode = collapsedWeekMode } }
   var weekStartsOn: Double = 1 {
     didSet {
-      let normalized = max(0, min(6, Int(weekStartsOn)))
-      calendarEngine.firstWeekday = normalized + 1
-      refreshWeekdayLabels()
-      requestRefresh()
+      vm.weekStartsOn = max(0, min(6, Int(weekStartsOn)))
+      updateCalendarEngine()
     }
   }
   var uses24HourClock: Bool?
-  var localeId: String? { didSet { updateCalendarConfig(); requestRefresh() } }
-  var appearance: CalendarAppearance = HybridNitroCalendar.defaultAppearance() { didSet { applyAppearance() } }
+  var localeId: String? { didSet { updateCalendarEngine() } }
+  var appearance: CalendarAppearance = HybridNitroCalendar.defaultAppearance() { didSet { vm.appearance = appearance } }
   var appearanceKey: String?
-  var strings: CalendarStrings = HybridNitroCalendar.defaultStrings() { didSet { refreshWeekdayLabels(); refreshHeader(); requestRefresh() } }
+  var strings: CalendarStrings = HybridNitroCalendar.defaultStrings() { didSet { vm.strings = strings } }
   var stringsKey: String?
-  var minTimestampMs: Double? { didSet { requestRefresh() } }
-  var maxTimestampMs: Double? { didSet { requestRefresh() } }
-  var onDateChange: ((_ event: DateChangeEvent) -> Void)?
-  var onVisibleRangeChange: ((_ event: VisibleRangeChangeEvent) -> Void)?
-  var onViewModeChange: ((_ event: ViewModeChangeEvent) -> Void)?
+  var minTimestampMs: Double? { didSet { vm.minTimestampMs = minTimestampMs } }
+  var maxTimestampMs: Double? { didSet { vm.maxTimestampMs = maxTimestampMs } }
+  var onDateChange: ((_ event: DateChangeEvent) -> Void)? { didSet { vm.onDateChange = onDateChange } }
+  var onVisibleRangeChange: ((_ event: VisibleRangeChangeEvent) -> Void)? { didSet { vm.onVisibleRangeChange = onVisibleRangeChange } }
+  var onViewModeChange: ((_ event: ViewModeChangeEvent) -> Void)? { didSet { vm.onViewModeChange = onViewModeChange } }
 
   required override init() {
-    layout.minimumLineSpacing = 0
-    layout.minimumInteritemSpacing = 0
-    calendarView.translatesAutoresizingMaskIntoConstraints = false
-    view = calendarView
+    container.translatesAutoresizingMaskIntoConstraints = false
+    view = container
     super.init()
-    calendarView.onLayout = { [weak self] size in
-      guard let self else { return }
-      guard size.width > 0, size.height > 0 else { return }
-      if self.lastLaidOutSize != size {
-        self.lastLaidOutSize = size
-        self.performRefreshNow()
-      }
-    }
-    setupViewHierarchy()
-    setupCollection()
-    updateCalendarConfig()
-    selectedDate = Date()
-    displayedMonthAnchor = startOfMonth(for: selectedDate)
-    yearSliceStart = computeYearSliceStart(for: selectedDate)
-    applyAppearance()
-    refreshWeekdayLabels()
-    requestRefresh()
+
+    let rootView = CalendarRootView(vm: vm)
+    let hc = UIHostingController(rootView: rootView)
+    hc.view.translatesAutoresizingMaskIntoConstraints = false
+    hc.view.backgroundColor = .clear
+    container.addSubview(hc.view)
+    NSLayoutConstraint.activate([
+      hc.view.topAnchor.constraint(equalTo: container.topAnchor),
+      hc.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      hc.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      hc.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+    ])
+    hostingController = hc
+
+    vm.selectedTimestampMs = selectedTimestampMs
+    vm.yearSliceStart = Foundation.Calendar.current.component(.year, from: Date()) - 6
   }
 
   func goToToday() throws {
-    selectedDate = Date()
-    selectedTimestampMs = msFromDate(selectedDate)
-    displayedMonthAnchor = startOfMonth(for: selectedDate)
-    if renderedMode == .month || renderedMode == .year {
-      applyViewMode(.day, emit: true)
+    let now = Date()
+    selectedTimestampMs = now.timeIntervalSince1970 * 1000
+    vm.selectedTimestampMs = selectedTimestampMs
+    vm.pageIndex = 10_000
+    vm.weekIndex = 0
+    if vm.mode == .month || vm.mode == .year {
+      vm.mode = vm.collapsedWeekMode ? .week : .day
+      vm.onViewModeChange?(ViewModeChangeEvent(mode: vm.mode))
     }
-    requestRefresh()
+    vm.onDateChange?(DateChangeEvent(timestampMs: vm.selectedTimestampMs))
   }
 
   func goToMonth(monthIndex: Double) throws {
-    var components = calendarEngine.dateComponents([.year, .month, .day], from: selectedDate)
-    components.month = max(1, min(12, Int(monthIndex) + 1))
-    components.day = min(components.day ?? 1, 28)
-    if let updated = calendarEngine.date(from: components) {
-      selectedDate = updated
-      selectedTimestampMs = msFromDate(updated)
-      displayedMonthAnchor = startOfMonth(for: updated)
-      applyViewMode(collapsedWeekMode ? .week : .day, emit: true)
-      requestRefresh()
+    var comps = vm.calendarEngine.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000))
+    comps.month = max(1, min(12, Int(monthIndex) + 1))
+    comps.day = min(comps.day ?? 1, 28)
+    if let updated = vm.calendarEngine.date(from: comps) {
+      let ms = updated.timeIntervalSince1970 * 1000
+      selectedTimestampMs = ms
+      vm.selectedTimestampMs = ms
+      // Navigate pager to the selected month
+      let todayComps = vm.calendarEngine.dateComponents([.year, .month], from: Date())
+      let updatedComps = vm.calendarEngine.dateComponents([.year, .month], from: updated)
+      let monthDiff = (updatedComps.year! - todayComps.year!) * 12 + (updatedComps.month! - todayComps.month!)
+      vm.pageIndex = 10_000 + monthDiff
+      vm.mode = vm.collapsedWeekMode ? .week : .day
     }
   }
 
   func goToYear(year: Double) throws {
-    var components = calendarEngine.dateComponents([.year, .month, .day], from: selectedDate)
-    components.year = Int(year)
-    components.day = min(components.day ?? 1, 28)
-    if let updated = calendarEngine.date(from: components) {
-      selectedDate = updated
-      selectedTimestampMs = msFromDate(updated)
-      displayedMonthAnchor = startOfMonth(for: updated)
-      yearSliceStart = computeYearSliceStart(for: updated)
-      applyViewMode(collapsedWeekMode ? .week : .day, emit: true)
-      requestRefresh()
+    var comps = vm.calendarEngine.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000))
+    comps.year = Int(year)
+    comps.day = min(comps.day ?? 1, 28)
+    if let updated = vm.calendarEngine.date(from: comps) {
+      let ms = updated.timeIntervalSince1970 * 1000
+      selectedTimestampMs = ms
+      vm.selectedTimestampMs = ms
+      vm.yearSliceStart = Int(year) - 6
+      // Navigate pager to the selected year/month
+      let todayComps = vm.calendarEngine.dateComponents([.year, .month], from: Date())
+      let updatedComps = vm.calendarEngine.dateComponents([.year, .month], from: updated)
+      let monthDiff = (updatedComps.year! - todayComps.year!) * 12 + (updatedComps.month! - todayComps.month!)
+      vm.pageIndex = 10_000 + monthDiff
+      vm.mode = vm.collapsedWeekMode ? .week : .day
     }
   }
 
@@ -140,644 +142,446 @@ class HybridNitroCalendar: HybridNitroCalendarSpec {
   }
 
   func setMarkers(markers: [DayMarkerCompact]) throws {
-    markerByDayStartMs.removeAll(keepingCapacity: true)
-    for marker in markers {
-      let key = Int64(dayStartMs(marker.timestampMs))
-      markerByDayStartMs[key] = marker.dotIndices.map { Int($0) }
+    var dict: [Int64: [Int]] = [:]
+    for m in markers {
+      let key = Int64(dayStartMs(m.timestampMs))
+      dict[key] = m.dotIndices.map { Int($0) }
     }
-    requestRefresh()
+    vm.markers = dict
   }
 
-  func beforeUpdate() {
-    isBatchUpdating = true
+  func beforeUpdate() {}
+  func afterUpdate() {}
+
+  private func updateCalendarEngine() {
+    var cal = Foundation.Calendar(identifier: .gregorian)
+    if let localeId, !localeId.isEmpty { cal.locale = Locale(identifier: localeId) }
+    if let timeZoneId, let tz = TimeZone(identifier: timeZoneId) { cal.timeZone = tz }
+    cal.firstWeekday = max(1, min(7, Int(weekStartsOn) + 1))
+    vm.calendarEngine = cal
   }
 
-  func afterUpdate() {
-    isBatchUpdating = false
-    if pendingRefresh {
-      pendingRefresh = false
-      requestRefresh()
-    }
+  private func dayStartMs(_ ms: Double) -> Double {
+    let date = Date(timeIntervalSince1970: ms / 1000)
+    let start = vm.calendarEngine.startOfDay(for: date)
+    return start.timeIntervalSince1970 * 1000
   }
 
-  private func setupViewHierarchy() {
-    calendarView.addSubview(headerContainer)
-    calendarView.addSubview(weekdayStack)
-    calendarView.addSubview(collectionView)
-
-    headerContainer.axis = .horizontal
-    headerContainer.distribution = .fill
-    headerContainer.alignment = .center
-    headerContainer.spacing = 8
-    headerContainer.translatesAutoresizingMaskIntoConstraints = false
-
-    [leftButton, monthButton, yearButton, centerSpacer, todayBackButton, rightButton, collapseButton].forEach { item in
-      if item === centerSpacer {
-        centerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        centerSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-      } else if let button = item as? UIButton {
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-        if #available(iOS 15.0, *) {
-          var config = button.configuration ?? UIButton.Configuration.plain()
-          config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
-          button.configuration = config
-        } else {
-          button.contentEdgeInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-        }
-      }
-      headerContainer.addArrangedSubview(item)
-    }
-
-    weekdayStack.axis = .horizontal
-    weekdayStack.distribution = .fillEqually
-    weekdayStack.alignment = .fill
-    weekdayStack.translatesAutoresizingMaskIntoConstraints = false
-    for _ in 0..<7 {
-      let label = UILabel()
-      label.textAlignment = .center
-      weekdayStack.addArrangedSubview(label)
-    }
-
-    collectionView.translatesAutoresizingMaskIntoConstraints = false
-    collectionView.backgroundColor = .clear
-
-    NSLayoutConstraint.activate([
-      headerContainer.topAnchor.constraint(equalTo: calendarView.topAnchor),
-      headerContainer.leadingAnchor.constraint(equalTo: calendarView.leadingAnchor, constant: 8),
-      headerContainer.trailingAnchor.constraint(equalTo: calendarView.trailingAnchor, constant: -8),
-
-      weekdayStack.topAnchor.constraint(equalTo: headerContainer.bottomAnchor, constant: 8),
-      weekdayStack.leadingAnchor.constraint(equalTo: calendarView.leadingAnchor, constant: 8),
-      weekdayStack.trailingAnchor.constraint(equalTo: calendarView.trailingAnchor, constant: -8),
-      weekdayStack.heightAnchor.constraint(equalToConstant: 24),
-
-      collectionView.topAnchor.constraint(equalTo: weekdayStack.bottomAnchor, constant: 6),
-      collectionView.leadingAnchor.constraint(equalTo: calendarView.leadingAnchor, constant: 8),
-      collectionView.trailingAnchor.constraint(equalTo: calendarView.trailingAnchor, constant: -8),
-      collectionView.bottomAnchor.constraint(equalTo: calendarView.bottomAnchor, constant: -8)
-    ])
-    let minHeight = collectionView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
-    minHeight.isActive = true
-    collectionMinHeightConstraint = minHeight
-
-    leftButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressPrev), for: .touchUpInside)
-    rightButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressNext), for: .touchUpInside)
-    monthButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressMonth), for: .touchUpInside)
-    yearButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressYear), for: .touchUpInside)
-    todayBackButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressTodayBack), for: .touchUpInside)
-    collapseButton.addTarget(coordinator, action: #selector(CalendarCoordinator.onPressCollapse), for: .touchUpInside)
-  }
-
-  private func setupCollection() {
-    collectionView.register(CalendarGridCell.self, forCellWithReuseIdentifier: "cell")
-    collectionView.dataSource = coordinator
-    collectionView.delegate = coordinator
-
-    let leftSwipe = UISwipeGestureRecognizer(target: coordinator, action: #selector(CalendarCoordinator.onSwipe(_:)))
-    leftSwipe.direction = .left
-    collectionView.addGestureRecognizer(leftSwipe)
-
-    let rightSwipe = UISwipeGestureRecognizer(target: coordinator, action: #selector(CalendarCoordinator.onSwipe(_:)))
-    rightSwipe.direction = .right
-    collectionView.addGestureRecognizer(rightSwipe)
-  }
-
-  private func updateCalendarConfig() {
-    var calendar = Calendar(identifier: .gregorian)
-    if let localeId, !localeId.isEmpty {
-      calendar.locale = Locale(identifier: localeId)
-    }
-    if let timeZoneId, let timeZone = TimeZone(identifier: timeZoneId) {
-      calendar.timeZone = timeZone
-    }
-    calendar.firstWeekday = max(1, min(7, Int(weekStartsOn) + 1))
-    calendarEngine = calendar
-  }
-
-  private func applyAppearance() {
-    calendarView.backgroundColor = colorFromHex(appearance.backgroundColor)
-    let headerColor = appearance.headerBackgroundColor ?? appearance.backgroundColor
-    headerContainer.backgroundColor = colorFromHex(headerColor)
-    refreshWeekdayLabels()
-    refreshHeader()
-    collectionView.reloadData()
-  }
-
-  private func refreshWeekdayLabels() {
-    let names = strings.weekdayNamesMin
-    for (index, view) in weekdayStack.arrangedSubviews.enumerated() {
-      guard let label = view as? UILabel else { continue }
-      let sourceIndex = index % max(1, names.count)
-      label.text = names.isEmpty ? "" : names[sourceIndex]
-      label.textColor = colorFromHex(appearance.weekdayTextColor)
-      label.font = UIFont.systemFont(
-        ofSize: CGFloat(appearance.weekdayFontSize ?? 12),
-        weight: .medium
-      )
-    }
-  }
-
-  private func requestRefresh() {
-    if isBatchUpdating {
-      pendingRefresh = true
-      return
-    }
-    if refreshScheduled {
-      return
-    }
-    refreshScheduled = true
-    DispatchQueue.main.async {
-      self.refreshScheduled = false
-      self.performRefreshNow()
-    }
-  }
-
-  private func performRefreshNow() {
-    rebuildData()
-    refreshHeader()
-    // Ensure collection bounds are up-to-date before reloading so cells can size correctly.
-    calendarView.layoutIfNeeded()
-    collectionView.collectionViewLayout.invalidateLayout()
-    collectionView.reloadData()
-    emitVisibleRangeIfChanged()
-  }
-
-  private func rebuildData() {
-    if renderedMode == .month {
-      weekdayStack.isHidden = true
-      pickerItems = strings.monthNamesFull ?? strings.monthNamesShort
-      if pickerItems.count < 12 {
-        let fallback = strings.monthNamesShort
-        pickerItems = (0..<12).map { index in
-          let i = index % max(1, fallback.count)
-          return fallback.isEmpty ? "\(index + 1)" : fallback[i]
-        }
-      } else {
-        pickerItems = Array(pickerItems.prefix(12))
-      }
-      dayItems = []
-      return
-    }
-
-    if renderedMode == .year {
-      weekdayStack.isHidden = true
-      pickerItems = (0..<12).map { "\(yearSliceStart + $0)" }
-      dayItems = []
-      return
-    }
-
-    weekdayStack.isHidden = false
-    pickerItems = []
-
-    if renderedMode == .week {
-      buildWeekItems()
-    } else {
-      buildMonthItems()
-    }
-  }
-
-  private func buildMonthItems() {
-    dayItems.removeAll(keepingCapacity: true)
-    let monthStart = startOfMonth(for: displayedMonthAnchor)
-    guard let monthRange = calendarEngine.range(of: .day, in: .month, for: monthStart) else {
-      buildFallbackMonthItems(from: monthStart)
-      return
-    }
-
-    let firstWeekdayIndex = calendarEngine.component(.weekday, from: monthStart)
-    let leading = (firstWeekdayIndex - calendarEngine.firstWeekday + 7) % 7
-
-    for index in 0..<(monthRange.count + leading) {
-      if let date = calendarEngine.date(byAdding: .day, value: index - leading, to: monthStart) {
-        dayItems.append(makeDayItem(for: date, inVisibleMonth: true))
-      }
-    }
-    while dayItems.count % 7 != 0 {
-      if let last = dayItems.last?.date, let next = calendarEngine.date(byAdding: .day, value: 1, to: last) {
-        dayItems.append(makeDayItem(for: next, inVisibleMonth: true))
-      } else {
-        break
-      }
-    }
-    if dayItems.isEmpty {
-      buildFallbackMonthItems(from: monthStart)
-    }
-  }
-
-  private func buildFallbackMonthItems(from monthStart: Date) {
-    for offset in 0..<42 {
-      guard let date = calendarEngine.date(byAdding: .day, value: offset, to: monthStart) else { continue }
-      dayItems.append(makeDayItem(for: date, inVisibleMonth: true))
-    }
-  }
-
-  private func buildWeekItems() {
-    dayItems.removeAll(keepingCapacity: true)
-    guard let weekStart = calendarEngine.dateInterval(of: .weekOfYear, for: selectedDate)?.start else { return }
-    for offset in 0..<7 {
-      guard let date = calendarEngine.date(byAdding: .day, value: offset, to: weekStart) else { continue }
-      dayItems.append(makeDayItem(for: date, inVisibleMonth: false))
-    }
-  }
-
-  private func makeDayItem(for date: Date, inVisibleMonth: Bool) -> DayItem {
-    let monthOfDate = calendarEngine.component(.month, from: date)
-    let monthOfAnchor = calendarEngine.component(.month, from: displayedMonthAnchor)
-    let sameMonth = monthOfDate == monthOfAnchor || !inVisibleMonth
-    let isToday = calendarEngine.isDateInToday(date)
-    let isSelected = calendarEngine.isDate(date, inSameDayAs: selectedDate)
-    let timestampMs = msFromDate(date)
-    let isDisabled = isOutOfRange(timestampMs)
-    let dots = markerByDayStartMs[Int64(dayStartMs(timestampMs))] ?? []
-    return DayItem(
-      date: date,
-      dayLabel: "\(calendarEngine.component(.day, from: date))",
-      isCurrentMonth: sameMonth,
-      isToday: isToday,
-      isSelected: isSelected,
-      isDisabled: isDisabled,
-      dotCount: min(3, dots.count)
-    )
-  }
-
-  private func refreshHeader() {
-    leftButton.setTitle("‹", for: .normal)
-    rightButton.setTitle("›", for: .normal)
-    collapseButton.setTitle(renderedMode == .week ? "⌄" : "⌃", for: .normal)
-    collapseButton.tintColor = colorFromHex(appearance.headerButtonColor)
-
-    let monthIndex = calendarEngine.component(.month, from: displayedMonthAnchor) - 1
-    let monthNames = strings.monthNamesFull ?? strings.monthNamesShort
-    let monthName = monthNames.indices.contains(monthIndex) ? monthNames[monthIndex] : "\(monthIndex + 1)"
-    monthButton.setTitle(monthName, for: .normal)
-    monthButton.tintColor = colorFromHex(appearance.headerTitleColor)
-
-    let year = calendarEngine.component(.year, from: displayedMonthAnchor)
-    yearButton.setTitle("\(year)", for: .normal)
-    yearButton.tintColor = colorFromHex(appearance.headerTitleColor)
-
-    let isPicker = renderedMode == .month || renderedMode == .year
-    todayBackButton.setTitle(isPicker ? strings.headerBack : strings.headerToday, for: .normal)
-    todayBackButton.tintColor = colorFromHex(appearance.headerTodayColor ?? appearance.headerButtonColor)
-
-    let chevronsVisible = renderedMode != .month
-    leftButton.isHidden = !chevronsVisible
-    rightButton.isHidden = !chevronsVisible
-    weekdayStack.isHidden = renderedMode == .month || renderedMode == .year
-  }
-
-  private func applyViewMode(_ mode: CalendarViewMode, emit: Bool) {
-    renderedMode = mode
-    requestRefresh()
-    if emit {
-      onViewModeChange?(ViewModeChangeEvent(mode: renderedMode))
-    }
-  }
-
-  private func applyCollapsedMode(emit: Bool) {
-    let target: CalendarViewMode = collapsedWeekMode ? .week : .day
-    if renderedMode != .month && renderedMode != .year {
-      renderedMode = target
-    }
-    requestRefresh()
-    if emit {
-      onViewModeChange?(ViewModeChangeEvent(mode: target))
-    }
-  }
-
-  private func emitVisibleRangeIfChanged() {
-    guard renderedMode == .day || renderedMode == .week else { return }
-    let monthStart = startOfMonth(for: displayedMonthAnchor)
-    guard
-      let prev = calendarEngine.date(byAdding: .month, value: -1, to: monthStart),
-      let next = calendarEngine.date(byAdding: .month, value: 2, to: monthStart),
-      let nextEnd = calendarEngine.date(byAdding: .second, value: -1, to: next)
-    else { return }
-
-    let range: (Double, Double) = (msFromDate(prev), msFromDate(nextEnd))
-    if let lastVisibleRange,
-       Swift.abs(lastVisibleRange.0 - range.0) < 1,
-       Swift.abs(lastVisibleRange.1 - range.1) < 1 {
-      return
-    }
-    lastVisibleRange = range
-    onVisibleRangeChange?(VisibleRangeChangeEvent(startMs: range.0, endMs: range.1))
-  }
-
-  private func shiftTimeline(forward: Bool) {
-    let forwardValue = forward ? 1 : -1
-    if renderedMode == .year {
-      yearSliceStart += forwardValue * 12
-    } else if renderedMode == .week {
-      if let next = calendarEngine.date(byAdding: .weekOfYear, value: forwardValue, to: selectedDate) {
-        selectedDate = next
-        selectedTimestampMs = msFromDate(next)
-        displayedMonthAnchor = startOfMonth(for: next)
-      }
-    } else {
-      if let next = calendarEngine.date(byAdding: .month, value: forwardValue, to: displayedMonthAnchor) {
-        displayedMonthAnchor = startOfMonth(for: next)
-      }
-    }
-    requestRefresh()
-  }
-
-  fileprivate func onPressPrev() {
-    let forward = isRTL
-    shiftTimeline(forward: forward)
-  }
-
-  fileprivate func onPressNext() {
-    let forward = !isRTL
-    shiftTimeline(forward: forward)
-  }
-
-  fileprivate func onPressMonth() {
-    applyViewMode(.month, emit: true)
-  }
-
-  fileprivate func onPressYear() {
-    yearSliceStart = computeYearSliceStart(for: displayedMonthAnchor)
-    applyViewMode(.year, emit: true)
-  }
-
-  fileprivate func onPressTodayBack() {
-    if renderedMode == .month || renderedMode == .year {
-      applyViewMode(collapsedWeekMode ? .week : .day, emit: true)
-      return
-    }
-    try? goToToday()
-  }
-
-  fileprivate func onPressCollapse() {
-    collapsedWeekMode.toggle()
-  }
-
-  fileprivate func onSwipe(_ recognizer: UISwipeGestureRecognizer) {
-    let isForwardSwipe = recognizer.direction == .left
-    let forward = isRTL ? !isForwardSwipe : isForwardSwipe
-    shiftTimeline(forward: forward)
-  }
-
-  fileprivate func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-    if renderedMode == .month || renderedMode == .year {
-      return pickerItems.count
-    }
-    return dayItems.count
-  }
-
-  fileprivate func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-    guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "cell", for: indexPath) as? CalendarGridCell else {
-      return UICollectionViewCell()
-    }
-
-    if renderedMode == .month || renderedMode == .year {
-      let value = pickerItems[indexPath.item]
-      let selected = (renderedMode == .month && indexPath.item == calendarEngine.component(.month, from: selectedDate) - 1)
-        || (renderedMode == .year && Int(value) == calendarEngine.component(.year, from: selectedDate))
-      cell.configurePicker(
-        title: value,
-        isSelected: selected,
-        textColor: colorFromHex(selected ? (appearance.pickerCellSelectedTextColor ?? appearance.selectedDayTextColor) : (appearance.pickerCellTextColor ?? appearance.dayTextColor)),
-        selectedBackground: colorFromHex(appearance.pickerCellSelectedBackgroundColor ?? appearance.selectedDayBackgroundColor),
-        normalBackground: colorFromHex(appearance.pickerCellBackgroundColor ?? appearance.backgroundColor)
-      )
-      return cell
-    }
-
-    let item = dayItems[indexPath.item]
-    let textColor: UIColor
-    if item.isDisabled {
-      textColor = colorFromHex(appearance.disabledDayTextColor)
-    } else if item.isSelected {
-      textColor = colorFromHex(appearance.selectedDayTextColor)
-    } else if item.isToday {
-      textColor = colorFromHex(appearance.todayTextColor)
-    } else if !item.isCurrentMonth {
-      textColor = colorFromHex(appearance.dayOutsideMonthTextColor)
-    } else {
-      textColor = colorFromHex(appearance.dayTextColor)
-    }
-
-    cell.configureDay(
-      title: item.dayLabel,
-      isSelected: item.isSelected,
-      isDisabled: item.isDisabled,
-      dotCount: item.dotCount,
-      textColor: textColor,
-      selectedBackground: colorFromHex(appearance.selectedDayBackgroundColor),
-      normalBackground: .clear,
-      dotColor: colorFromHex(appearance.markerAccentColor ?? appearance.todayIndicatorColor ?? appearance.todayTextColor)
-    )
-    return cell
-  }
-
-  fileprivate func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-    if renderedMode == .month {
-      let month = indexPath.item + 1
-      try? goToMonth(monthIndex: Double(month - 1))
-      return
-    }
-    if renderedMode == .year {
-      let year = yearSliceStart + indexPath.item
-      try? goToYear(year: Double(year))
-      return
-    }
-
-    let item = dayItems[indexPath.item]
-    guard !item.isDisabled else { return }
-    selectedDate = item.date
-    selectedTimestampMs = msFromDate(item.date)
-    onDateChange?(DateChangeEvent(timestampMs: selectedTimestampMs))
-    if renderedMode == .day {
-      displayedMonthAnchor = startOfMonth(for: item.date)
-    }
-    requestRefresh()
-  }
-
-  fileprivate func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
-    let spacing: CGFloat = CGFloat(appearance.spacing ?? 0)
-    let fallbackWidth = max(0, UIScreen.main.bounds.width - 32)
-    let measuredWidth = max(collectionView.bounds.width, max(0, calendarView.bounds.width - 16))
-    let width = measuredWidth > 1 ? measuredWidth : fallbackWidth
-    let columns: CGFloat = (renderedMode == .month || renderedMode == .year) ? 3 : 7
-    let rawWidth = (width - (columns - 1) * spacing) / columns
-    let itemWidth = max(1, floor(rawWidth))
-    let height: CGFloat
-    if renderedMode == .month || renderedMode == .year {
-      height = max(36, CGFloat(appearance.rowHeight ?? 44))
-    } else {
-      height = max(34, CGFloat(appearance.rowHeight ?? 40))
-    }
-    return CGSize(width: itemWidth, height: height)
-  }
-
-  private func startOfMonth(for date: Date) -> Date {
-    let components = calendarEngine.dateComponents([.year, .month], from: date)
-    return calendarEngine.date(from: components) ?? date
-  }
-
-  private func dayStartMs(_ timestampMs: Double) -> Double {
-    let start = calendarEngine.startOfDay(for: dateFromMs(timestampMs))
-    return msFromDate(start)
-  }
-
-  private func dateFromMs(_ timestampMs: Double) -> Date {
-    return Date(timeIntervalSince1970: timestampMs / 1000.0)
-  }
-
-  private func msFromDate(_ date: Date) -> Double {
-    return date.timeIntervalSince1970 * 1000.0
-  }
-
-  private func isOutOfRange(_ timestampMs: Double) -> Bool {
-    if let minTimestampMs, timestampMs < minTimestampMs { return true }
-    if let maxTimestampMs, timestampMs > maxTimestampMs { return true }
-    return false
-  }
-
-  private func computeYearSliceStart(for date: Date) -> Int {
-    let year = calendarEngine.component(.year, from: date)
-    return year - 6
-  }
-
-  private func colorFromHex(_ hex: String) -> UIColor {
-    let sanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
-    var value: UInt64 = 0
-    Scanner(string: sanitized).scanHexInt64(&value)
-    let r, g, b: CGFloat
-    switch sanitized.count {
-    case 6:
-      r = CGFloat((value >> 16) & 0xFF) / 255.0
-      g = CGFloat((value >> 8) & 0xFF) / 255.0
-      b = CGFloat(value & 0xFF) / 255.0
-    default:
-      r = 0.0
-      g = 0.0
-      b = 0.0
-    }
-    return UIColor(red: r, green: g, blue: b, alpha: 1.0)
-  }
-
-  private static func defaultAppearance() -> CalendarAppearance {
+  static func defaultAppearance() -> CalendarAppearance {
     return CalendarAppearance(
-      backgroundColor: "#FFFFFF",
-      separatorColor: nil,
-      headerBackgroundColor: nil,
-      headerTitleColor: "#111827",
-      headerSubtitleColor: nil,
-      headerButtonColor: "#2563EB",
-      headerTodayColor: nil,
-      weekdayTextColor: "#6B7280",
-      weekdayFontSize: 12,
-      weekdayFontWeight: nil,
-      dayTextColor: "#111827",
-      dayOutsideMonthTextColor: "#9CA3AF",
-      selectedDayBackgroundColor: "#2563EB",
-      selectedDayTextColor: "#FFFFFF",
-      todayTextColor: "#2563EB",
-      todayIndicatorColor: nil,
-      disabledDayTextColor: "#D1D5DB",
-      pickerCellBackgroundColor: nil,
-      pickerCellSelectedBackgroundColor: nil,
-      pickerCellTextColor: nil,
-      pickerCellSelectedTextColor: nil,
-      fontFamily: nil,
-      fontSizeDay: 14,
-      fontSizeHeader: 14,
-      fontWeight: nil,
-      dayCellSize: nil,
-      rowHeight: 40,
-      headerHeight: 36,
-      spacing: 0,
-      cornerRadius: 8,
-      borderColor: nil,
-      borderWidth: nil,
-      markerPalette: ["#2563EB"],
-      markerAccentColor: nil
+      backgroundColor: "#FFFFFF", separatorColor: nil, headerBackgroundColor: nil,
+      headerTitleColor: "#111827", headerSubtitleColor: nil, headerButtonColor: "#2563EB",
+      headerTodayColor: nil, weekdayTextColor: "#6B7280", weekdayFontSize: 12,
+      weekdayFontWeight: nil, dayTextColor: "#111827", dayOutsideMonthTextColor: "#9CA3AF",
+      selectedDayBackgroundColor: "#2563EB", selectedDayTextColor: "#FFFFFF",
+      todayTextColor: "#2563EB", todayIndicatorColor: nil, disabledDayTextColor: "#D1D5DB",
+      pickerCellBackgroundColor: nil, pickerCellSelectedBackgroundColor: nil,
+      pickerCellTextColor: nil, pickerCellSelectedTextColor: nil, fontFamily: nil,
+      fontSizeDay: 14, fontSizeHeader: 14, fontWeight: nil, dayCellSize: nil,
+      rowHeight: 40, headerHeight: 36, spacing: 0, cornerRadius: 8,
+      borderColor: nil, borderWidth: nil, markerPalette: ["#2563EB"], markerAccentColor: nil
     )
   }
 
-  private static func defaultStrings() -> CalendarStrings {
+  static func defaultStrings() -> CalendarStrings {
     return CalendarStrings(
-      monthNamesShort: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+      monthNamesShort: ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
       monthNamesFull: nil,
-      weekdayNamesMin: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
-      headerToday: "Today",
-      headerBack: "Back",
-      labelShowWeekView: nil,
-      labelShowMonthView: nil,
-      accessibilityPrev: nil,
-      accessibilityNext: nil
+      weekdayNamesMin: ["Mo","Tu","We","Th","Fr","Sa","Su"],
+      headerToday: "Today", headerBack: "Back",
+      labelShowWeekView: nil, labelShowMonthView: nil,
+      accessibilityPrev: nil, accessibilityNext: nil
     )
   }
 }
 
-private final class CalendarRootView: UIView {
-  var onLayout: ((CGSize) -> Void)?
+// MARK: - CalendarRootView (Tasks 3.2 + 3.3 + 3.4 + 3.5 + 3.6)
 
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    onLayout?(bounds.size)
+struct CalendarRootView: View {
+  @ObservedObject var vm: CalendarViewModel
+
+  // Derive displayed month/year from pageIndex so header updates on swipe
+  private var displayedDate: Date {
+    let offset = vm.pageIndex - 10_000
+    return vm.calendarEngine.date(byAdding: .month, value: offset, to: {
+      let comps = vm.calendarEngine.dateComponents([.year, .month], from: Date())
+      return vm.calendarEngine.date(from: comps) ?? Date()
+    }()) ?? Date()
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      CalendarHeaderView(vm: vm, displayedDate: displayedDate)
+      if vm.mode != .month && vm.mode != .year {
+        WeekdayRowView(vm: vm)
+      }
+      ZStack {
+        if vm.mode == .day || vm.mode == .week {
+          VStack(spacing: 0) {
+            DayGridView(vm: vm)
+            // Collapse toggle — centered below grid, like legacy design
+            let collapseLabel = vm.collapsedWeekMode
+              ? (vm.strings.labelShowMonthView ?? "Month view")
+              : (vm.strings.labelShowWeekView ?? "Week view")
+            Button(action: {
+              if !vm.collapsedWeekMode {
+                // Collapsing: find which week contains the selected date on the current page
+                let cal = vm.calendarEngine
+                let offset = vm.pageIndex - 10_000
+                let todayComps = cal.dateComponents([.year, .month], from: Date())
+                if let todayStart = cal.date(from: DateComponents(year: todayComps.year, month: todayComps.month, day: 1)),
+                   let anchor = cal.date(byAdding: .month, value: offset, to: todayStart) {
+                  var c = cal.dateComponents([.year, .month], from: anchor); c.day = 1
+                  if let monthStart = cal.date(from: c),
+                     let monthRange = cal.range(of: .day, in: .month, for: monthStart) {
+                    let firstWeekday = cal.component(.weekday, from: monthStart)
+                    let leading = (firstWeekday - cal.firstWeekday + 7) % 7
+                    let selectedDate = Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000)
+                    var found = 0
+                    let totalCells = ((leading + monthRange.count + 6) / 7) * 7
+                    for i in 0..<totalCells {
+                      if let date = cal.date(byAdding: .day, value: i - leading, to: monthStart),
+                         cal.isDate(date, inSameDayAs: selectedDate) {
+                        found = i / 7
+                        break
+                      }
+                    }
+                    vm.weekIndex = found
+                  }
+                }
+              }
+              withAnimation(.easeInOut(duration: 0.25)) { vm.collapsedWeekMode.toggle() }
+              vm.onViewModeChange?(ViewModeChangeEvent(mode: vm.collapsedWeekMode ? .week : .day))
+            }) {
+              HStack(spacing: 4) {
+                Text(vm.collapsedWeekMode ? "⌄" : "⌃")
+                Text(collapseLabel)
+              }
+              .font(.system(size: 13))
+              .foregroundColor(Color(hex: vm.appearance.headerButtonColor))
+              .frame(maxWidth: .infinity)
+              .padding(.vertical, 6)
+            }
+          }
+          .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        } else if vm.mode == .month {
+          MonthPickerView(vm: vm)
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        } else {
+          YearPickerView(vm: vm)
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        }
+      }
+      .animation(.easeInOut(duration: 0.2), value: vm.mode)
+    }
+    .background(Color(hex: vm.appearance.backgroundColor))
   }
 }
 
-private final class CalendarCoordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
-  weak var owner: HybridNitroCalendar?
+// MARK: - CalendarHeaderView (Task 3.2)
 
-  init(owner: HybridNitroCalendar) {
-    self.owner = owner
-    super.init()
+struct CalendarHeaderView: View {
+  @ObservedObject var vm: CalendarViewModel
+  let displayedDate: Date
+
+  var body: some View {
+    HStack(spacing: 4) {
+      if vm.mode != .month {
+        Button(vm.isRTL ? "›" : "‹") {
+          if vm.mode == .year {
+            vm.yearSliceStart -= 12
+          } else if vm.collapsedWeekMode {
+            navigateWeek(forward: vm.isRTL)
+          } else {
+            withAnimation(.easeInOut(duration: 0.3)) { vm.pageIndex += vm.isRTL ? 1 : -1 }
+          }
+        }
+        .foregroundColor(Color(hex: vm.appearance.headerButtonColor))
+      }
+      Button(monthName) {
+        vm.mode = .month
+        vm.onViewModeChange?(ViewModeChangeEvent(mode: .month))
+      }
+      .foregroundColor(Color(hex: vm.appearance.headerTitleColor))
+      Button(yearName) {
+        vm.yearSliceStart = vm.calendarEngine.component(.year, from: displayedDate) - 6
+        vm.mode = .year
+        vm.onViewModeChange?(ViewModeChangeEvent(mode: .year))
+      }
+      .foregroundColor(Color(hex: vm.appearance.headerTitleColor))
+      Spacer()
+      Button(vm.mode == .month || vm.mode == .year ? vm.strings.headerBack : vm.strings.headerToday) {
+        if vm.mode == .month || vm.mode == .year {
+          vm.mode = vm.collapsedWeekMode ? .week : .day
+          vm.onViewModeChange?(ViewModeChangeEvent(mode: vm.mode))
+        } else {
+          let now = Date()
+          vm.selectedTimestampMs = now.timeIntervalSince1970 * 1000
+          vm.pageIndex = 10_000
+          vm.onDateChange?(DateChangeEvent(timestampMs: vm.selectedTimestampMs))
+        }
+      }
+      .foregroundColor(Color(hex: vm.appearance.headerTodayColor ?? vm.appearance.headerButtonColor))
+      if vm.mode != .month {
+        Button(vm.isRTL ? "‹" : "›") {
+          if vm.mode == .year {
+            vm.yearSliceStart += 12
+          } else if vm.collapsedWeekMode {
+            navigateWeek(forward: !vm.isRTL)
+          } else {
+            withAnimation(.easeInOut(duration: 0.3)) { vm.pageIndex += vm.isRTL ? -1 : 1 }
+          }
+        }
+        .foregroundColor(Color(hex: vm.appearance.headerButtonColor))
+      }
+    }
+    .padding(.horizontal, 8)
+    .frame(height: CGFloat(vm.appearance.headerHeight ?? 36))
+    .background(Color(hex: vm.appearance.headerBackgroundColor ?? vm.appearance.backgroundColor))
   }
 
-  @objc func onPressPrev() {
-    owner?.onPressPrev()
+  /// Move one week forward or backward — purely index-based, no date searching.
+  private func navigateWeek(forward: Bool) {
+    let cal = vm.calendarEngine
+    let offset = vm.pageIndex - 10_000
+    let todayComps = cal.dateComponents([.year, .month], from: Date())
+    guard let todayMonthStart = cal.date(from: DateComponents(year: todayComps.year, month: todayComps.month, day: 1)),
+          let anchorMonth = cal.date(byAdding: .month, value: offset, to: todayMonthStart) else { return }
+    var c = cal.dateComponents([.year, .month], from: anchorMonth); c.day = 1
+    guard let monthStart = cal.date(from: c),
+          let monthRange = cal.range(of: .day, in: .month, for: monthStart) else { return }
+    let firstWeekday = cal.component(.weekday, from: monthStart)
+    let leading = (firstWeekday - cal.firstWeekday + 7) % 7
+    let totalCells = ((leading + monthRange.count + 6) / 7) * 7
+    let totalWeeks = totalCells / 7
+
+    if forward {
+      if vm.weekIndex < totalWeeks - 1 {
+        vm.weekIndex += 1
+      } else {
+        vm.weekIndex = 0
+        vm.pageIndex += 1
+      }
+    } else {
+      if vm.weekIndex > 0 {
+        vm.weekIndex -= 1
+      } else {
+        // Go to previous month — set weekIndex to its last week
+        let prevOffset = offset - 1
+        guard let prevAnchor = cal.date(byAdding: .month, value: prevOffset, to: todayMonthStart) else { return }
+        var pc = cal.dateComponents([.year, .month], from: prevAnchor); pc.day = 1
+        guard let prevMonthStart = cal.date(from: pc),
+              let prevRange = cal.range(of: .day, in: .month, for: prevMonthStart) else { return }
+        let prevFirstWeekday = cal.component(.weekday, from: prevMonthStart)
+        let prevLeading = (prevFirstWeekday - cal.firstWeekday + 7) % 7
+        let prevTotalCells = ((prevLeading + prevRange.count + 6) / 7) * 7
+        vm.weekIndex = (prevTotalCells / 7) - 1
+        vm.pageIndex -= 1
+      }
+    }
   }
 
-  @objc func onPressNext() {
-    owner?.onPressNext()
+  private var monthName: String {
+    let monthIndex = vm.calendarEngine.component(.month, from: displayedDate) - 1
+    let names = vm.strings.monthNamesFull ?? vm.strings.monthNamesShort
+    return names.indices.contains(monthIndex) ? names[monthIndex] : "\(monthIndex + 1)"
   }
 
-  @objc func onPressMonth() {
-    owner?.onPressMonth()
-  }
-
-  @objc func onPressYear() {
-    owner?.onPressYear()
-  }
-
-  @objc func onPressTodayBack() {
-    owner?.onPressTodayBack()
-  }
-
-  @objc func onPressCollapse() {
-    owner?.onPressCollapse()
-  }
-
-  @objc func onSwipe(_ recognizer: UISwipeGestureRecognizer) {
-    owner?.onSwipe(recognizer)
-  }
-
-  func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-    return owner?.collectionView(collectionView, numberOfItemsInSection: section) ?? 0
-  }
-
-  func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-    return owner?.collectionView(collectionView, cellForItemAt: indexPath) ?? UICollectionViewCell()
-  }
-
-  func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-    owner?.collectionView(collectionView, didSelectItemAt: indexPath)
-  }
-
-  func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
-    return owner?.collectionView(collectionView, layout: collectionViewLayout, sizeForItemAt: indexPath) ?? .zero
+  private var yearName: String {
+    "\(vm.calendarEngine.component(.year, from: displayedDate))"
   }
 }
 
-private struct DayItem {
+// MARK: - WeekdayRowView
+
+struct WeekdayRowView: View {
+  @ObservedObject var vm: CalendarViewModel
+
+  var body: some View {
+    HStack(spacing: 0) {
+      ForEach(vm.strings.weekdayNamesMin.indices, id: \.self) { i in
+        Text(vm.strings.weekdayNamesMin[i])
+          .frame(maxWidth: .infinity)
+          .font(.system(size: CGFloat(vm.appearance.weekdayFontSize ?? 12), weight: .medium))
+          .foregroundColor(Color(hex: vm.appearance.weekdayTextColor))
+      }
+    }
+    .frame(height: 24)
+  }
+}
+
+// MARK: - DayGridView (Tasks 3.4 + 3.5)
+
+struct DayGridView: View {
+  @ObservedObject var vm: CalendarViewModel
+
+  var body: some View {
+    TabView(selection: Binding(
+      get: { vm.pageIndex },
+      set: { newPage in
+        vm.pageIndex = newPage
+        emitVisibleRange(for: newPage)
+      }
+    )) {
+      ForEach(0..<20_001, id: \.self) { idx in
+        MonthGridPage(monthOffset: idx - 10_000, vm: vm)
+          .tag(idx)
+      }
+    }
+    .tabViewStyle(.page(indexDisplayMode: .never))
+    .onChange(of: vm.pageIndex) { _ in }
+  }
+
+  private func emitVisibleRange(for pageIndex: Int) {
+    let offset = pageIndex - 10_000
+    let anchor = vm.calendarEngine.date(byAdding: .month, value: offset, to: startOfCurrentMonth()) ?? Date()
+    guard
+      let prev = vm.calendarEngine.date(byAdding: .month, value: -1, to: anchor),
+      let next = vm.calendarEngine.date(byAdding: .month, value: 2, to: anchor),
+      let nextEnd = vm.calendarEngine.date(byAdding: .second, value: -1, to: next)
+    else { return }
+    vm.onVisibleRangeChange?(VisibleRangeChangeEvent(
+      startMs: prev.timeIntervalSince1970 * 1000,
+      endMs: nextEnd.timeIntervalSince1970 * 1000
+    ))
+  }
+
+  private func startOfCurrentMonth() -> Date {
+    let comps = vm.calendarEngine.dateComponents([.year, .month], from: Date())
+    return vm.calendarEngine.date(from: comps) ?? Date()
+  }
+}
+
+// MARK: - MonthGridPage (Task 3.4 — GeometryReader cell sizing, no UIScreen.main.bounds)
+
+struct MonthGridPage: View {
+  let monthOffset: Int
+  @ObservedObject var vm: CalendarViewModel
+
+  var body: some View {
+    GeometryReader { geo in
+      let columns = 7
+      let cellW = geo.size.width / CGFloat(columns)
+      let allItems = buildDayItems()
+
+      // In collapsed week mode: show the week at vm.weekIndex
+      let items: [DayItemModel] = {
+        if vm.collapsedWeekMode {
+          let totalWeeks = allItems.count / 7
+          let safeIdx = min(vm.weekIndex, totalWeeks - 1)
+          return Array(allItems.dropFirst(safeIdx * 7).prefix(7))
+        }
+        return allItems
+      }()
+
+      let rowCount = items.count / 7
+
+      // Task 3.5: collapse animation — rowCount drives height
+      LazyVGrid(
+        columns: Array(repeating: GridItem(.fixed(cellW), spacing: 0), count: columns),
+        spacing: 0
+      ) {
+        ForEach(0..<(rowCount * columns), id: \.self) { i in
+          if i < items.count {
+            DayCellView(item: items[i], vm: vm, cellWidth: cellW)
+          } else {
+            Color.clear.frame(width: cellW, height: CGFloat(vm.appearance.rowHeight ?? 40))
+          }
+        }
+      }
+      .frame(width: geo.size.width)
+      .animation(.easeInOut(duration: 0.25), value: rowCount)
+    }
+  }
+
+  private func buildDayItems() -> [DayItemModel] {
+    let cal = vm.calendarEngine
+    // Anchor from today's month + offset, not from selectedTimestampMs
+    let todayComps = cal.dateComponents([.year, .month], from: Date())
+    let todayMonthStart = cal.date(from: todayComps) ?? Date()
+    guard let anchor = cal.date(byAdding: .month, value: monthOffset, to: todayMonthStart) else { return [] }
+    let monthStart = startOfMonth(anchor)
+    guard let monthRange = cal.range(of: .day, in: .month, for: monthStart) else { return [] }
+    let firstWeekday = cal.component(.weekday, from: monthStart)
+    let leading = (firstWeekday - cal.firstWeekday + 7) % 7
+    var items: [DayItemModel] = []
+    let total = ((leading + monthRange.count + 6) / 7) * 7
+    let selectedDate = Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000)
+    for i in 0..<total {
+      guard let date = cal.date(byAdding: .day, value: i - leading, to: monthStart) else { continue }
+      let ms = date.timeIntervalSince1970 * 1000
+      // isCurrentMonth is always relative to the page anchor month (the displayed month).
+      // Grey days are those outside the anchor month, same in both week and month view.
+      // Tapping a grey day in week view just selects it — it stays grey (same as legacy).
+      let inMonth = cal.component(.month, from: date) == cal.component(.month, from: monthStart)
+                 && cal.component(.year, from: date) == cal.component(.year, from: monthStart)
+      let isToday = cal.isDateInToday(date)
+      let isSelected = cal.isDate(date, inSameDayAs: selectedDate)
+      let isDisabled = (vm.minTimestampMs.map { ms < $0 } ?? false) || (vm.maxTimestampMs.map { ms > $0 } ?? false)
+      let dayKey = Int64(cal.startOfDay(for: date).timeIntervalSince1970 * 1000)
+      let dots = min(3, vm.markers[dayKey]?.count ?? 0)
+      items.append(DayItemModel(date: date, label: "\(cal.component(.day, from: date))",
+        isCurrentMonth: inMonth, isToday: isToday, isSelected: isSelected,
+        isDisabled: isDisabled, dotCount: dots))
+    }
+    return items
+  }
+
+  private func startOfMonth(_ date: Date) -> Date {
+    let comps = vm.calendarEngine.dateComponents([.year, .month], from: date)
+    return vm.calendarEngine.date(from: comps) ?? date
+  }
+}
+
+// MARK: - DayCellView
+
+struct DayCellView: View {
+  let item: DayItemModel
+  @ObservedObject var vm: CalendarViewModel
+  let cellWidth: CGFloat
+
+  var body: some View {
+    let rowH = CGFloat(vm.appearance.rowHeight ?? 40)
+    let textColor: Color = {
+      if item.isDisabled { return Color(hex: vm.appearance.disabledDayTextColor) }
+      if !item.isCurrentMonth { return Color(hex: vm.appearance.dayOutsideMonthTextColor) }
+      if item.isSelected { return Color(hex: vm.appearance.selectedDayTextColor) }
+      if item.isToday { return Color(hex: vm.appearance.todayTextColor) }
+      return Color(hex: vm.appearance.dayTextColor)
+    }()
+
+    VStack(spacing: 2) {
+      Text(item.label)
+        .font(.system(size: CGFloat(vm.appearance.fontSizeDay ?? 14)))
+        .foregroundColor(textColor)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      if item.dotCount > 0 && item.isCurrentMonth {
+        HStack(spacing: 2) {
+          ForEach(0..<item.dotCount, id: \.self) { _ in
+            Circle()
+              .fill(Color(hex: vm.appearance.markerAccentColor ?? vm.appearance.todayTextColor))
+              .frame(width: 4, height: 4)
+          }
+        }
+      }
+    }
+    .frame(width: cellWidth, height: rowH)
+    .background(item.isSelected && item.isCurrentMonth ? Color(hex: vm.appearance.selectedDayBackgroundColor) : Color.clear)
+    .cornerRadius(CGFloat(vm.appearance.cornerRadius ?? 8))
+    .opacity(item.isDisabled ? 0.4 : 1.0)
+    .onTapGesture {
+      // Grey (out-of-month) and disabled days are not tappable
+      guard !item.isDisabled && item.isCurrentMonth else { return }
+      let ms = item.date.timeIntervalSince1970 * 1000
+      vm.selectedTimestampMs = ms
+      vm.onDateChange?(DateChangeEvent(timestampMs: ms))
+    }
+  }
+}
+
+struct DayItemModel {
   let date: Date
-  let dayLabel: String
+  let label: String
   let isCurrentMonth: Bool
   let isToday: Bool
   let isSelected: Bool
@@ -785,81 +589,105 @@ private struct DayItem {
   let dotCount: Int
 }
 
-private final class CalendarGridCell: UICollectionViewCell {
-  private let label = UILabel()
-  private let dotsContainer = UIStackView()
-  private let backgroundPill = UIView()
+// MARK: - MonthPickerView (Task 3.6)
 
-  override init(frame: CGRect) {
-    super.init(frame: frame)
-    contentView.addSubview(backgroundPill)
-    backgroundPill.translatesAutoresizingMaskIntoConstraints = false
-    backgroundPill.layer.cornerRadius = 8
-    backgroundPill.clipsToBounds = true
+struct MonthPickerView: View {
+  @ObservedObject var vm: CalendarViewModel
 
-    label.translatesAutoresizingMaskIntoConstraints = false
-    label.textAlignment = .center
-    backgroundPill.addSubview(label)
+  var body: some View {
+    let names: [String] = {
+      let full = vm.strings.monthNamesFull ?? vm.strings.monthNamesShort
+      return full.count >= 12 ? Array(full.prefix(12)) : (0..<12).map { full.indices.contains($0) ? full[$0] : "\($0+1)" }
+    }()
+    let currentMonth = vm.calendarEngine.component(.month, from: Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000)) - 1
 
-    dotsContainer.axis = .horizontal
-    dotsContainer.spacing = 2
-    dotsContainer.alignment = .center
-    dotsContainer.distribution = .fillEqually
-    dotsContainer.translatesAutoresizingMaskIntoConstraints = false
-    backgroundPill.addSubview(dotsContainer)
-
-    NSLayoutConstraint.activate([
-      backgroundPill.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
-      backgroundPill.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 2),
-      backgroundPill.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -2),
-      backgroundPill.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-
-      label.topAnchor.constraint(equalTo: backgroundPill.topAnchor, constant: 6),
-      label.leadingAnchor.constraint(equalTo: backgroundPill.leadingAnchor, constant: 4),
-      label.trailingAnchor.constraint(equalTo: backgroundPill.trailingAnchor, constant: -4),
-
-      dotsContainer.topAnchor.constraint(greaterThanOrEqualTo: label.bottomAnchor, constant: 2),
-      dotsContainer.bottomAnchor.constraint(equalTo: backgroundPill.bottomAnchor, constant: -4),
-      dotsContainer.centerXAnchor.constraint(equalTo: backgroundPill.centerXAnchor),
-      dotsContainer.heightAnchor.constraint(equalToConstant: 6),
-      dotsContainer.widthAnchor.constraint(equalToConstant: 20)
-    ])
-  }
-
-  required init?(coder: NSCoder) {
-    fatalError("init(coder:) has not been implemented")
-  }
-
-  func configureDay(title: String, isSelected: Bool, isDisabled: Bool, dotCount: Int, textColor: UIColor, selectedBackground: UIColor, normalBackground: UIColor, dotColor: UIColor) {
-    label.text = title
-    label.textColor = textColor
-    label.alpha = isDisabled ? 0.7 : 1.0
-    backgroundPill.backgroundColor = isSelected ? selectedBackground : normalBackground
-    updateDots(count: dotCount, color: dotColor)
-  }
-
-  func configurePicker(title: String, isSelected: Bool, textColor: UIColor, selectedBackground: UIColor, normalBackground: UIColor) {
-    label.text = title
-    label.textColor = textColor
-    label.alpha = 1
-    backgroundPill.backgroundColor = isSelected ? selectedBackground : normalBackground
-    updateDots(count: 0, color: .clear)
-  }
-
-  private func updateDots(count: Int, color: UIColor) {
-    dotsContainer.arrangedSubviews.forEach { view in
-      dotsContainer.removeArrangedSubview(view)
-      view.removeFromSuperview()
+    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 3), spacing: 0) {
+      ForEach(0..<12, id: \.self) { i in
+        let isSelected = i == currentMonth
+        Text(names[i])
+          .font(.system(size: CGFloat(vm.appearance.fontSizeDay ?? 14)))
+          .foregroundColor(Color(hex: isSelected
+            ? (vm.appearance.pickerCellSelectedTextColor ?? vm.appearance.selectedDayTextColor)
+            : (vm.appearance.pickerCellTextColor ?? vm.appearance.dayTextColor)))
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 10)
+          .background(Color(hex: isSelected
+            ? (vm.appearance.pickerCellSelectedBackgroundColor ?? vm.appearance.selectedDayBackgroundColor)
+            : (vm.appearance.pickerCellBackgroundColor ?? vm.appearance.backgroundColor)))
+          .cornerRadius(CGFloat(vm.appearance.cornerRadius ?? 8))
+          .onTapGesture {
+            try? vm.onDateChange.map { _ in }
+            var comps = vm.calendarEngine.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000))
+            comps.month = i + 1
+            comps.day = min(comps.day ?? 1, 28)
+            if let updated = vm.calendarEngine.date(from: comps) {
+              vm.selectedTimestampMs = updated.timeIntervalSince1970 * 1000
+            }
+            vm.mode = vm.collapsedWeekMode ? .week : .day
+            vm.onViewModeChange?(ViewModeChangeEvent(mode: vm.mode))
+          }
+      }
     }
-    guard count > 0 else { return }
-    for _ in 0..<count {
-      let dot = UIView()
-      dot.backgroundColor = color
-      dot.layer.cornerRadius = 2
-      dot.translatesAutoresizingMaskIntoConstraints = false
-      dot.widthAnchor.constraint(equalToConstant: 4).isActive = true
-      dot.heightAnchor.constraint(equalToConstant: 4).isActive = true
-      dotsContainer.addArrangedSubview(dot)
+    .padding(8)
+  }
+}
+
+// MARK: - YearPickerView (Task 3.6)
+
+struct YearPickerView: View {
+  @ObservedObject var vm: CalendarViewModel
+
+  var body: some View {
+    let currentYear = vm.calendarEngine.component(.year, from: Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000))
+
+    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 3), spacing: 0) {
+      ForEach(0..<12, id: \.self) { i in
+        let year = vm.yearSliceStart + i
+        let isSelected = year == currentYear
+        Text("\(year)")
+          .font(.system(size: CGFloat(vm.appearance.fontSizeDay ?? 14)))
+          .foregroundColor(Color(hex: isSelected
+            ? (vm.appearance.pickerCellSelectedTextColor ?? vm.appearance.selectedDayTextColor)
+            : (vm.appearance.pickerCellTextColor ?? vm.appearance.dayTextColor)))
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 10)
+          .background(Color(hex: isSelected
+            ? (vm.appearance.pickerCellSelectedBackgroundColor ?? vm.appearance.selectedDayBackgroundColor)
+            : (vm.appearance.pickerCellBackgroundColor ?? vm.appearance.backgroundColor)))
+          .cornerRadius(CGFloat(vm.appearance.cornerRadius ?? 8))
+          .onTapGesture {
+            var comps = vm.calendarEngine.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000))
+            comps.year = year
+            comps.day = min(comps.day ?? 1, 28)
+            if let updated = vm.calendarEngine.date(from: comps) {
+              vm.selectedTimestampMs = updated.timeIntervalSince1970 * 1000
+            }
+            vm.yearSliceStart = year - 6
+            vm.mode = vm.collapsedWeekMode ? .week : .day
+            vm.onViewModeChange?(ViewModeChangeEvent(mode: vm.mode))
+          }
+      }
     }
+    .padding(8)
+  }
+}
+
+// MARK: - Color(hex:) helper
+
+extension Color {
+  init(hex: String) {
+    let s = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
+    var v: UInt64 = 0
+    Scanner(string: s).scanHexInt64(&v)
+    let r, g, b: Double
+    switch s.count {
+    case 6:
+      r = Double((v >> 16) & 0xFF) / 255
+      g = Double((v >> 8) & 0xFF) / 255
+      b = Double(v & 0xFF) / 255
+    default:
+      r = 0; g = 0; b = 0
+    }
+    self.init(red: r, green: g, blue: b)
   }
 }

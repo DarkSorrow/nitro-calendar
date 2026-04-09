@@ -1,876 +1,647 @@
 package com.margelo.nitro.novasteraoss.nitrocalendar
 
-import android.content.Context
-import android.graphics.Color
 import android.icu.util.Calendar
 import android.icu.util.TimeZone
-import android.view.GestureDetector
-import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
-import android.view.ViewConfiguration
-import android.view.ViewTreeObserver
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
-import androidx.core.graphics.toColorInt
-import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.facebook.proguard.annotations.DoNotStrip
 import com.facebook.react.uimanager.ThemedReactContext
+import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.floor
-import kotlin.math.max
 import kotlin.math.min
-
-/**
- * Day/week grid: intercepts dominant horizontal drags & horizontal flings so month navigation
- * is not eaten by [RecyclerView] scroll handling. Picker modes delegate to default behavior.
- */
-private class CalendarGridRecyclerView(
-  context: Context,
-  private val isPickerMode: () -> Boolean,
-  private val isRtl: () -> Boolean,
-  private val onSwipe: (forward: Boolean) -> Unit,
-) : RecyclerView(context) {
-
-  private var downX = 0f
-  private var downY = 0f
-  private var horizontalDrag = false
-  private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
-  private val swipeMinPx = max(36, (40 * context.resources.displayMetrics.density).toInt())
-  private val minFlingVx =
-    min(380, ViewConfiguration.get(context).scaledMinimumFlingVelocity * 2)
-
-  private val flingDetector =
-    GestureDetector(
-      context,
-      object : GestureDetector.SimpleOnGestureListener() {
-        override fun onFling(
-          e1: MotionEvent?,
-          e2: MotionEvent,
-          velocityX: Float,
-          velocityY: Float,
-        ): Boolean {
-          if (isPickerMode()) return false
-          if (e1 == null) return false
-          if (abs(velocityY) > abs(velocityX) * 1.08f) return false
-          if (abs(velocityX) < minFlingVx) return false
-          val forward = velocityX < 0
-          onSwipe(if (isRtl()) !forward else forward)
-          return true
-        }
-      },
-    )
-
-  override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
-    if (isPickerMode()) return super.onInterceptTouchEvent(e)
-    when (e.actionMasked) {
-      MotionEvent.ACTION_DOWN -> {
-        downX = e.x
-        downY = e.y
-        horizontalDrag = false
-      }
-      MotionEvent.ACTION_MOVE -> {
-        val dx = abs(e.x - downX)
-        val dy = abs(e.y - downY)
-        if (!horizontalDrag && dx > touchSlop && dx > dy * 0.95f) {
-          horizontalDrag = true
-          parent?.requestDisallowInterceptTouchEvent(true)
-        }
-      }
-    }
-    return if (horizontalDrag) true else super.onInterceptTouchEvent(e)
-  }
-
-  override fun onTouchEvent(e: MotionEvent): Boolean {
-    if (isPickerMode()) return super.onTouchEvent(e)
-    flingDetector.onTouchEvent(e)
-    if (horizontalDrag) {
-      when (e.actionMasked) {
-        MotionEvent.ACTION_MOVE -> return true
-        MotionEvent.ACTION_UP -> {
-          val dx = e.x - downX
-          val dy = e.y - downY
-          if (abs(dx) >= swipeMinPx && abs(dx) >= abs(dy) * 0.85f) {
-            val forward = dx < 0
-            onSwipe(if (isRtl()) !forward else forward)
-          }
-          horizontalDrag = false
-          return true
-        }
-        MotionEvent.ACTION_CANCEL -> {
-          horizontalDrag = false
-          return true
-        }
-      }
-    }
-    return super.onTouchEvent(e)
-  }
-}
+import kotlin.math.max
 
 @DoNotStrip
 class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitroCalendarSpec() {
 
-  private val root = LinearLayout(context).apply {
-    orientation = LinearLayout.VERTICAL
-    setPadding(8.dp(), 8.dp(), 8.dp(), 8.dp())
-  }
-  private val header = LinearLayout(context).apply {
-    orientation = LinearLayout.HORIZONTAL
-    gravity = Gravity.CENTER_VERTICAL
-  }
-  private val prevButton = Button(context)
-  private val monthButton = Button(context)
-  private val yearButton = Button(context)
-  private val todayBackButton = Button(context)
-  private val nextButton = Button(context)
-  private val collapseButton = Button(context)
-  private val weekdayRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-  private val recycler: RecyclerView =
-    CalendarGridRecyclerView(
-      context,
-      isPickerMode = { renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR },
-      isRtl = { isRTL },
-      onSwipe = { forward -> shiftTimeline(forward) },
-    )
-  private val dayLayoutManager = GridLayoutManager(context, 7)
-  private val pickerLayoutManager = GridLayoutManager(context, 3)
+  private val composeView = ComposeView(context)
+  override val view: View = composeView
 
-  override val view: View = root
-
-  private val dayAdapter = DayAdapter(::onDayCellPressed)
-  private val pickerAdapter = PickerAdapter(::onPickerCellPressed)
-
-  private var renderedMode: CalendarViewMode = CalendarViewMode.DAY
-  private var selectedCalendar = Calendar.getInstance(TimeZone.getDefault()).apply { firstDayOfWeek = Calendar.MONDAY }
-  private var displayedMonthAnchor = (selectedCalendar.clone() as Calendar).startOfMonth()
-  private var yearSliceStart: Int = selectedCalendar.get(Calendar.YEAR) - 6
-  private var dayItems: List<DayItem> = emptyList()
-  private var pickerItems: List<String> = emptyList()
-  private var markersByDayStart = mutableMapOf<Long, IntArray>()
-  private var lastVisibleRange: Pair<Double, Double>? = null
-  private var lastDayGridLayoutSize: Pair<Int, Int> = 0 to 0
-  private var isBatchUpdating = false
-  private var pendingRefresh = false
-  private var refreshScheduled = false
-
-  private val dayGridGlobalLayoutListener =
-    ViewTreeObserver.OnGlobalLayoutListener {
-      if (renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR) return@OnGlobalLayoutListener
-      val w = recycler.width
-      val h = recycler.height
-      if (w <= 0 || h <= 0 || root.height <= 0) return@OnGlobalLayoutListener
-      val size = w to h
-      if (size != lastDayGridLayoutSize) {
-        lastDayGridLayoutSize = size
-        dayAdapter.notifyDataSetChanged()
-      }
-    }
+  private var _selectedTimestampMs by mutableStateOf(System.currentTimeMillis().toDouble())
+  private var _renderedMode by mutableStateOf(CalendarViewMode.DAY)
+  private var _collapsedWeekMode by mutableStateOf(false)
+  // Week index within the current month page (0 = first week, increments independently of selection)
+  private var _weekIndex by mutableStateOf(0)
+  private var _isRTL by mutableStateOf(false)
+  private var _appearance by mutableStateOf(defaultAppearance())
+  private var _strings by mutableStateOf(defaultStrings())
+  private var _pageIndex by mutableStateOf(10_000)
+  private var _yearSliceStart by mutableStateOf(Calendar.getInstance().get(Calendar.YEAR) - 6)
+  private var _minTimestampMs by mutableStateOf<Double?>(null)
+  private var _maxTimestampMs by mutableStateOf<Double?>(null)
+  private var _markers by mutableStateOf<Map<Long, IntArray>>(emptyMap())
 
   override var selectedTimestampMs: Double = System.currentTimeMillis().toDouble()
-    set(value) {
-      val timelineChanged = abs(value - field) > 0.5
-      field = value
-      selectedCalendar = calendarFor(value)
-      if (timelineChanged && (renderedMode == CalendarViewMode.DAY || renderedMode == CalendarViewMode.WEEK)) {
-        displayedMonthAnchor = (selectedCalendar.clone() as Calendar).startOfMonth()
-      }
-      if (timelineChanged) {
-        requestRefresh()
-      }
-    }
-
+    set(value) { field = value; _selectedTimestampMs = value }
   override var initialTimestampMs: Double? = null
   override var calendarType: CalendarType = CalendarType.GREGORIAN
   override var isRTL: Boolean = false
-    set(value) {
-      field = value
-      refreshHeader()
-    }
+    set(value) { field = value; _isRTL = value }
   override var timeZoneId: String? = null
-    set(value) {
-      field = value
-      requestRefresh()
-    }
   override var viewMode: CalendarViewMode = CalendarViewMode.DAY
-    set(value) {
-      field = value
-      applyViewMode(value, true)
-    }
+    set(value) { field = value; _renderedMode = value; onViewModeChange?.invoke(ViewModeChangeEvent(value)) }
   override var collapsedWeekMode: Boolean = false
-    set(value) {
-      field = value
-      applyCollapsedMode(true)
-    }
+    set(value) { field = value; _collapsedWeekMode = value }
   override var weekStartsOn: Double = 1.0
-    set(value) {
-      field = value
-      requestRefresh()
-    }
   override var uses24HourClock: Boolean? = null
   override var localeId: String? = null
   override var appearance: CalendarAppearance = defaultAppearance()
-    set(value) {
-      field = value
-      applyAppearance()
-    }
+    set(value) { field = value; _appearance = value }
   override var appearanceKey: String? = null
   override var strings: CalendarStrings = defaultStrings()
-    set(value) {
-      field = value
-      refreshWeekdayRow()
-      requestRefresh()
-    }
+    set(value) { field = value; _strings = value }
   override var stringsKey: String? = null
   override var minTimestampMs: Double? = null
-    set(value) {
-      field = value
-      requestRefresh()
-    }
+    set(value) { field = value; _minTimestampMs = value }
   override var maxTimestampMs: Double? = null
-    set(value) {
-      field = value
-      requestRefresh()
-    }
+    set(value) { field = value; _maxTimestampMs = value }
   override var onDateChange: ((event: DateChangeEvent) -> Unit)? = null
   override var onVisibleRangeChange: ((event: VisibleRangeChangeEvent) -> Unit)? = null
   override var onViewModeChange: ((event: ViewModeChangeEvent) -> Unit)? = null
 
   init {
-    setupView()
-    applyAppearance()
-    refreshWeekdayRow()
-    requestRefresh()
-    root.post {
-      runRefreshUiNow()
-    }
-    root.addOnAttachStateChangeListener(
-      object : View.OnAttachStateChangeListener {
-        override fun onViewAttachedToWindow(v: View) {
-          v.post {
-            lastDayGridLayoutSize = 0 to 0
-            runRefreshUiNow()
-            root.requestLayout()
-            recycler.requestLayout()
-            recycler.post {
-              if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR &&
-                recycler.width > 0 && recycler.height > 0) {
-                dayAdapter.notifyDataSetChanged()
-              }
-            }
-          }
-        }
-
-        override fun onViewDetachedFromWindow(v: View) = Unit
-      },
-    )
-    root.viewTreeObserver.addOnGlobalLayoutListener(dayGridGlobalLayoutListener)
-  }
-
-  private fun runRefreshUiNow() {
-    if (isBatchUpdating) {
-      pendingRefresh = true
-      return
-    }
-    refreshScheduled = false
-    refreshUi()
+    composeView.setContent { CalendarRoot() }
   }
 
   override fun goToToday() {
     val now = Calendar.getInstance(resolveTimeZone())
-    selectedCalendar = now
     selectedTimestampMs = now.timeInMillis.toDouble()
-    displayedMonthAnchor = (now.clone() as Calendar).startOfMonth()
-    if (renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR) {
-      applyViewMode(if (collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY, true)
+    _selectedTimestampMs = selectedTimestampMs
+    _pageIndex = 10_000
+    _weekIndex = 0  // today is always in the first visible week when we reset to today's month
+    if (_renderedMode == CalendarViewMode.MONTH || _renderedMode == CalendarViewMode.YEAR) {
+      _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
     }
-    requestRefresh()
   }
 
   override fun goToMonth(monthIndex: Double) {
-    val month = min(11, max(0, monthIndex.toInt()))
-    val updated = selectedCalendar.clone() as Calendar
-    updated.set(Calendar.MONTH, month)
-    updated.set(Calendar.DAY_OF_MONTH, min(28, updated.get(Calendar.DAY_OF_MONTH)))
-    selectedCalendar = updated
-    selectedTimestampMs = updated.timeInMillis.toDouble()
-    displayedMonthAnchor = (updated.clone() as Calendar).startOfMonth()
-    applyViewMode(if (collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY, true)
+    val cal = calendarFor(_selectedTimestampMs)
+    cal.set(Calendar.MONTH, min(11, max(0, monthIndex.toInt())))
+    cal.set(Calendar.DAY_OF_MONTH, min(28, cal.get(Calendar.DAY_OF_MONTH)))
+    selectedTimestampMs = cal.timeInMillis.toDouble()
+    _selectedTimestampMs = selectedTimestampMs
+    // Navigate pager to the selected month
+    val todayCal = Calendar.getInstance(resolveTimeZone())
+    val monthDiff = (cal.get(Calendar.YEAR) - todayCal.get(Calendar.YEAR)) * 12 +
+      (cal.get(Calendar.MONTH) - todayCal.get(Calendar.MONTH))
+    _pageIndex = 10_000 + monthDiff
+    _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
+    onViewModeChange?.invoke(ViewModeChangeEvent(_renderedMode))
   }
 
   override fun goToYear(year: Double) {
-    val updated = selectedCalendar.clone() as Calendar
-    updated.set(Calendar.YEAR, year.toInt())
-    updated.set(Calendar.DAY_OF_MONTH, min(28, updated.get(Calendar.DAY_OF_MONTH)))
-    selectedCalendar = updated
-    selectedTimestampMs = updated.timeInMillis.toDouble()
-    displayedMonthAnchor = (updated.clone() as Calendar).startOfMonth()
-    yearSliceStart = updated.get(Calendar.YEAR) - 6
-    applyViewMode(if (collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY, true)
+    val cal = calendarFor(_selectedTimestampMs)
+    cal.set(Calendar.YEAR, year.toInt())
+    cal.set(Calendar.DAY_OF_MONTH, min(28, cal.get(Calendar.DAY_OF_MONTH)))
+    selectedTimestampMs = cal.timeInMillis.toDouble()
+    _selectedTimestampMs = selectedTimestampMs
+    _yearSliceStart = year.toInt() - 6
+    // Navigate pager to the selected year/month
+    val todayCal = Calendar.getInstance(resolveTimeZone())
+    val monthDiff = (cal.get(Calendar.YEAR) - todayCal.get(Calendar.YEAR)) * 12 +
+      (cal.get(Calendar.MONTH) - todayCal.get(Calendar.MONTH))
+    _pageIndex = 10_000 + monthDiff
+    _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
+    onViewModeChange?.invoke(ViewModeChangeEvent(_renderedMode))
   }
 
-  override fun setCollapsedWeekModeEnabled(enabled: Boolean) {
-    collapsedWeekMode = enabled
-  }
-
+  override fun setCollapsedWeekModeEnabled(enabled: Boolean) { collapsedWeekMode = enabled }
   override fun setMarkers(markers: Array<DayMarkerCompact>) {
-    markersByDayStart.clear()
-    markers.forEach { marker ->
-      val dayKey = dayStartMs(marker.timestampMs).toLong()
-      markersByDayStart[dayKey] = marker.dotIndices.map { it.toInt() }.toIntArray()
+    val map = mutableMapOf<Long, IntArray>()
+    markers.forEach { m ->
+      map[dayStartMs(m.timestampMs).toLong()] = m.dotIndices.map { it.toInt() }.toIntArray()
     }
-    requestRefresh()
+    _markers = map
   }
+  override fun beforeUpdate() {}
+  override fun afterUpdate() {}
 
-  override fun beforeUpdate() {
-    isBatchUpdating = true
-  }
+  // MARK: - Composables
 
-  override fun afterUpdate() {
-    isBatchUpdating = false
-    if (pendingRefresh) {
-      pendingRefresh = false
-      requestRefresh()
+  @Composable
+  private fun CalendarRoot() {
+    val scope = rememberCoroutineScope()
+    val pagerState = rememberPagerState(initialPage = _pageIndex) { 20_001 }
+
+    // Derive the displayed month/year from pagerState.currentPage
+    val displayedCal = remember(pagerState.currentPage) {
+      val offset = pagerState.currentPage - 10_000
+      Calendar.getInstance(resolveTimeZone()).apply { add(Calendar.MONTH, offset) }
     }
-    root.post {
-      lastDayGridLayoutSize = 0 to 0
-      runRefreshUiNow()
-      if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR &&
-        recycler.width > 0 && recycler.height > 0) {
-        dayAdapter.notifyDataSetChanged()
+
+    // Sync pager → _pageIndex when user swipes
+    LaunchedEffect(pagerState.currentPage) {
+      if (_pageIndex != pagerState.currentPage) {
+        _pageIndex = pagerState.currentPage
+        emitVisibleRange(pagerState.currentPage)
+      }
+    }
+
+    // Sync _pageIndex → pager when set externally (today button, greyed day tap, goToMonth etc.)
+    LaunchedEffect(_pageIndex) {
+      if (pagerState.currentPage != _pageIndex) {
+        pagerState.animateScrollToPage(_pageIndex, animationSpec = tween(300))
+      }
+    }
+
+    Column(
+      modifier = Modifier.fillMaxWidth().background(parseColor(_appearance.backgroundColor))
+    ) {
+      CalendarHeader(
+        displayedCal = displayedCal,
+        onChevronPrev = {
+          if (_collapsedWeekMode) {
+            if (_weekIndex > 0) {
+              _weekIndex--
+            } else {
+              // At week 0 — go to previous month, set weekIndex to its last week
+              val prevPage = pagerState.currentPage + if (_isRTL) 1 else -1
+              val prevOffset = prevPage - 10_000
+              val nowCal = Calendar.getInstance(resolveTimeZone())
+              val prevAnchor = (nowCal.clone() as Calendar).apply { add(Calendar.MONTH, prevOffset) }.startOfMonth()
+              val prevItems = buildDayItems(prevAnchor)
+              _weekIndex = (prevItems.size / 7) - 1
+              scope.launch { pagerState.animateScrollToPage(prevPage, animationSpec = tween(300)) }
+            }
+          } else {
+            scope.launch {
+              pagerState.animateScrollToPage(
+                pagerState.currentPage + if (_isRTL) 1 else -1,
+                animationSpec = tween(300)
+              )
+            }
+          }
+        },
+        onChevronNext = {
+          if (_collapsedWeekMode) {
+            val currentOffset = pagerState.currentPage - 10_000
+            val nowCal = Calendar.getInstance(resolveTimeZone())
+            val anchor = (nowCal.clone() as Calendar).apply { add(Calendar.MONTH, currentOffset) }.startOfMonth()
+            val items = buildDayItems(anchor)
+            val totalWeeks = items.size / 7
+            if (_weekIndex < totalWeeks - 1) {
+              _weekIndex++
+            } else {
+              // At last week — go to next month, week 0
+              _weekIndex = 0
+              scope.launch {
+                pagerState.animateScrollToPage(
+                  pagerState.currentPage + if (_isRTL) -1 else 1,
+                  animationSpec = tween(300)
+                )
+              }
+            }
+          } else {
+            scope.launch {
+              pagerState.animateScrollToPage(
+                pagerState.currentPage + if (_isRTL) -1 else 1,
+                animationSpec = tween(300)
+              )
+            }
+          }
+        }
+      )
+
+      Crossfade(
+        targetState = _renderedMode,
+        animationSpec = tween(200),
+        modifier = Modifier.fillMaxWidth()
+      ) { mode ->
+        when (mode) {
+          CalendarViewMode.DAY, CalendarViewMode.WEEK -> {
+            Column {
+              Row(modifier = Modifier.fillMaxWidth()) {
+                _strings.weekdayNamesMin.forEach { name ->
+                  Text(
+                    text = name,
+                    modifier = Modifier.weight(1f),
+                    fontSize = (_appearance.weekdayFontSize ?: 12.0).sp,
+                    color = parseColor(_appearance.weekdayTextColor),
+                    textAlign = TextAlign.Center
+                  )
+                }
+              }
+              DayGridView(pagerState = pagerState)
+              // Collapse toggle button — centered below grid, like legacy design
+              val collapseLabel = if (_collapsedWeekMode)
+                (_strings.labelShowMonthView ?: "Month view")
+              else
+                (_strings.labelShowWeekView ?: "Week view")
+              TextButton(
+                onClick = {
+                  if (!_collapsedWeekMode) {
+                    // Collapsing: find which week contains the selected date on the current page
+                    val currentOffset = pagerState.currentPage - 10_000
+                    val nowCal = Calendar.getInstance(resolveTimeZone())
+                    val anchor = (nowCal.clone() as Calendar).apply { add(Calendar.MONTH, currentOffset) }.startOfMonth()
+                    val items = buildDayItems(anchor)
+                    val selectedCal = calendarFor(_selectedTimestampMs)
+                    val foundIdx = items.indexOfFirst { sameDay(calendarFor(it.timestampMs), selectedCal) }
+                    _weekIndex = if (foundIdx >= 0) foundIdx / 7 else 0
+                  }
+                  _collapsedWeekMode = !_collapsedWeekMode
+                  collapsedWeekMode = _collapsedWeekMode
+                  onViewModeChange?.invoke(ViewModeChangeEvent(if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY))
+                },
+                modifier = Modifier.fillMaxWidth()
+              ) {
+                Text(
+                  text = (if (_collapsedWeekMode) "⌄ " else "⌃ ") + collapseLabel,
+                  color = parseColor(_appearance.headerButtonColor),
+                  fontSize = 13.sp,
+                  textAlign = TextAlign.Center
+                )
+              }
+            }
+          }
+          CalendarViewMode.MONTH -> MonthPickerView()
+          CalendarViewMode.YEAR -> YearPickerView()
+        }
       }
     }
   }
 
-  private fun setupView() {
-    root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-    root.addView(weekdayRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 24.dp()))
-    root.addView(recycler, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+  @Composable
+  private fun CalendarHeader(
+    displayedCal: Calendar,
+    onChevronPrev: () -> Unit,
+    onChevronNext: () -> Unit
+  ) {
+    val monthIndex = displayedCal.get(Calendar.MONTH)
+    val year = displayedCal.get(Calendar.YEAR)
+    val monthNames = _strings.monthNamesFull ?: _strings.monthNamesShort
+    val monthName = monthNames.getOrNull(monthIndex) ?: (monthIndex + 1).toString()
+    val inPicker = _renderedMode == CalendarViewMode.MONTH || _renderedMode == CalendarViewMode.YEAR
 
-    listOf(prevButton, monthButton, yearButton, todayBackButton, nextButton, collapseButton).forEach {
-      it.isAllCaps = false
-      header.addView(it)
-    }
+    val onPrev: () -> Unit = if (_renderedMode == CalendarViewMode.YEAR) {
+      { _yearSliceStart -= 12 }
+    } else onChevronPrev
 
-    prevButton.text = "‹"
-    nextButton.text = "›"
-    collapseButton.text = "⌃"
+    val onNext: () -> Unit = if (_renderedMode == CalendarViewMode.YEAR) {
+      { _yearSliceStart += 12 }
+    } else onChevronNext
 
-    prevButton.setOnClickListener { shiftTimeline(forward = isRTL) }
-    nextButton.setOnClickListener { shiftTimeline(forward = !isRTL) }
-    monthButton.setOnClickListener { applyViewMode(CalendarViewMode.MONTH, true) }
-    yearButton.setOnClickListener {
-      yearSliceStart = displayedMonthAnchor.get(Calendar.YEAR) - 6
-      applyViewMode(CalendarViewMode.YEAR, true)
-    }
-    todayBackButton.setOnClickListener {
-      if (renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR) {
-        applyViewMode(if (collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY, true)
-      } else {
-        goToToday()
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .height((_appearance.headerHeight ?: 36.0).dp)
+        .background(parseColor(_appearance.headerBackgroundColor ?: _appearance.backgroundColor)),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      if (_renderedMode != CalendarViewMode.MONTH) {
+        TextButton(onClick = onPrev) {
+          Text(if (_isRTL) "›" else "‹", color = parseColor(_appearance.headerButtonColor))
+        }
       }
-    }
-    collapseButton.setOnClickListener { collapsedWeekMode = !collapsedWeekMode }
-
-    recycler.layoutManager = dayLayoutManager
-    recycler.adapter = dayAdapter
-    recycler.itemAnimator = null
-    recycler.setHasFixedSize(false)
-    recycler.overScrollMode = View.OVER_SCROLL_NEVER
-    recycler.minimumHeight = (280 * context.resources.displayMetrics.density).toInt()
-
-    repeat(7) {
-      val label = TextView(context)
-      label.gravity = Gravity.CENTER
-      weekdayRow.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+      TextButton(onClick = {
+        _renderedMode = CalendarViewMode.MONTH
+        onViewModeChange?.invoke(ViewModeChangeEvent(CalendarViewMode.MONTH))
+      }) {
+        Text(monthName, color = parseColor(_appearance.headerTitleColor))
+      }
+      TextButton(onClick = {
+        _yearSliceStart = year - 6
+        _renderedMode = CalendarViewMode.YEAR
+        onViewModeChange?.invoke(ViewModeChangeEvent(CalendarViewMode.YEAR))
+      }) {
+        Text(year.toString(), color = parseColor(_appearance.headerTitleColor))
+      }
+      Spacer(modifier = Modifier.weight(1f))
+      TextButton(onClick = {
+        if (inPicker) {
+          _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
+          onViewModeChange?.invoke(ViewModeChangeEvent(_renderedMode))
+        } else {
+          goToToday()
+        }
+      }) {
+        Text(
+          if (inPicker) _strings.headerBack else _strings.headerToday,
+          color = parseColor(_appearance.headerTodayColor ?: _appearance.headerButtonColor)
+        )
+      }
+      if (!inPicker) {
+        // Collapse button moved to below the grid — not in header
+      }
+      if (_renderedMode != CalendarViewMode.MONTH) {
+        TextButton(onClick = onNext) {
+          Text(if (_isRTL) "‹" else "›", color = parseColor(_appearance.headerButtonColor))
+        }
+      }
     }
   }
 
-  private fun applyAppearance() {
-    root.setBackgroundColor(parseColorSafe(appearance.backgroundColor))
-    val headerColor = appearance.headerBackgroundColor ?: appearance.backgroundColor
-    header.setBackgroundColor(parseColorSafe(headerColor))
-    val buttonColor = parseColorSafe(appearance.headerButtonColor)
-    listOf(prevButton, nextButton, collapseButton, todayBackButton).forEach { it.setTextColor(buttonColor) }
-    monthButton.setTextColor(parseColorSafe(appearance.headerTitleColor))
-    yearButton.setTextColor(parseColorSafe(appearance.headerTitleColor))
-    refreshWeekdayRow()
-    requestRefresh()
-  }
-
-  private fun refreshWeekdayRow() {
-    weekdayRow.visibility = if (renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR) View.GONE else View.VISIBLE
-    val names = strings.weekdayNamesMin
-    weekdayRow.childrenIndexed().forEach { (index, view) ->
-      (view as? TextView)?.apply {
-        text = if (names.isEmpty()) "" else names[index % names.size]
-        setTextColor(parseColorSafe(appearance.weekdayTextColor))
-        textSize = (appearance.weekdayFontSize ?: 12.0).toFloat()
-      }
+  @Composable
+  private fun DayGridView(pagerState: androidx.compose.foundation.pager.PagerState) {
+    HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth()) { page ->
+      MonthGridPage(monthOffset = page - 10_000)
     }
   }
 
-  private fun requestRefresh() {
-    if (isBatchUpdating) {
-      pendingRefresh = true
-      return
-    }
-    if (refreshScheduled) {
-      return
-    }
-    refreshScheduled = true
-    recycler.post {
-      refreshScheduled = false
-      refreshUi()
-    }
-  }
+  @Composable
+  private fun MonthGridPage(monthOffset: Int) {
+    val nowCal = Calendar.getInstance(resolveTimeZone())
+    val anchor = (nowCal.clone() as Calendar).apply { add(Calendar.MONTH, monthOffset) }.startOfMonth()
+    val items = buildDayItems(anchor)
 
-  private fun refreshUi() {
-    val firstDay = (weekStartsOn.toInt().coerceIn(0, 6) + 1)
-    selectedCalendar.firstDayOfWeek = firstDay
-    displayedMonthAnchor.firstDayOfWeek = firstDay
-    rebuildData()
-    refreshHeader()
-    if (renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR) {
-      if (recycler.layoutManager !== pickerLayoutManager) {
-        recycler.layoutManager = pickerLayoutManager
-      }
-      if (recycler.adapter !== pickerAdapter) {
-        recycler.adapter = pickerAdapter
-      }
-      pickerAdapter.submitItems(pickerItems, renderedMode, selectedCalendar.get(Calendar.YEAR), selectedCalendar.get(Calendar.MONTH))
+    val displayItems = if (_collapsedWeekMode) {
+      val safeWeekIdx = _weekIndex.coerceIn(0, (items.size / 7) - 1)
+      items.drop(safeWeekIdx * 7).take(7)
     } else {
-      if (recycler.layoutManager !== dayLayoutManager) {
-        recycler.layoutManager = dayLayoutManager
-      }
-      if (recycler.adapter !== dayAdapter) {
-        recycler.adapter = dayAdapter
-      }
-      dayAdapter.submitItems(dayItems, appearance, strings)
-      emitVisibleRangeIfNeeded()
-      recycler.post {
-        if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR) {
-          val w = recycler.width
-          val h = recycler.height
-          if (w > 0 && h > 0) {
-            lastDayGridLayoutSize = w to h
-            dayAdapter.notifyDataSetChanged()
+      items
+    }
+
+    LazyVerticalGrid(
+      columns = GridCells.Fixed(7),
+      modifier = Modifier.fillMaxWidth(),
+      userScrollEnabled = false
+    ) {
+      items(displayItems.size) { i -> DayCellView(item = displayItems[i]) }
+    }
+  }
+
+  @Composable
+  private fun DayCellView(item: DayItemModel) {
+    val ap = _appearance
+    val textColor = when {
+      item.isDisabled -> parseColor(ap.disabledDayTextColor)
+      !item.isCurrentMonth -> parseColor(ap.dayOutsideMonthTextColor)  // grey — checked before selected/today
+      item.isSelected -> parseColor(ap.selectedDayTextColor)
+      item.isToday -> parseColor(ap.todayTextColor)
+      else -> parseColor(ap.dayTextColor)
+    }
+    val rowH = (ap.rowHeight ?: 40.0).dp
+    val cornerR = (ap.cornerRadius ?: 8.0).dp
+
+    Box(
+      modifier = Modifier
+        .fillMaxWidth()
+        .height(rowH)
+        .clip(RoundedCornerShape(cornerR))
+        .background(
+          if (item.isSelected && item.isCurrentMonth) parseColor(ap.selectedDayBackgroundColor)
+          else Color.Transparent
+        )
+        .alpha(if (item.isDisabled) 0.4f else 1f)
+        // Grey (out-of-month) days are not tappable — user must swipe to that month first
+        .then(
+          if (!item.isDisabled && item.isCurrentMonth)
+            Modifier.clickable {
+              _selectedTimestampMs = item.timestampMs
+              selectedTimestampMs = item.timestampMs
+              onDateChange?.invoke(DateChangeEvent(item.timestampMs))
+            }
+          else Modifier
+        ),
+      contentAlignment = Alignment.Center
+    ) {
+      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = item.label, color = textColor, fontSize = (ap.fontSizeDay ?: 14.0).sp)
+        if (item.dotCount > 0 && item.isCurrentMonth) {
+          Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            repeat(item.dotCount) {
+              Box(
+                modifier = Modifier
+                  .size(4.dp)
+                  .clip(RoundedCornerShape(2.dp))
+                  .background(parseColor(ap.markerAccentColor ?: ap.todayTextColor))
+              )
+            }
           }
         }
       }
     }
-    refreshWeekdayRow()
   }
 
-  private fun refreshHeader() {
-    val monthIndex = displayedMonthAnchor.get(Calendar.MONTH)
-    val monthNames = strings.monthNamesFull ?: strings.monthNamesShort
-    monthButton.text = monthNames.getOrNull(monthIndex) ?: (monthIndex + 1).toString()
-    yearButton.text = displayedMonthAnchor.get(Calendar.YEAR).toString()
-    val inPicker = renderedMode == CalendarViewMode.MONTH || renderedMode == CalendarViewMode.YEAR
-    todayBackButton.text = if (inPicker) strings.headerBack else strings.headerToday
-    prevButton.visibility = if (renderedMode == CalendarViewMode.MONTH) View.GONE else View.VISIBLE
-    nextButton.visibility = if (renderedMode == CalendarViewMode.MONTH) View.GONE else View.VISIBLE
-    collapseButton.text = if (renderedMode == CalendarViewMode.WEEK) "⌄" else "⌃"
-  }
+  @Composable
+  private fun MonthPickerView() {
+    val ap = _appearance
+    val rawNames = _strings.monthNamesFull ?: _strings.monthNamesShort
+    val names: List<String> = if (rawNames.size >= 12) rawNames.take(12)
+                              else (0..11).map { i -> rawNames.getOrNull(i) ?: (i + 1).toString() }
+    val currentMonth = calendarFor(_selectedTimestampMs).get(Calendar.MONTH)
 
-  private fun applyViewMode(mode: CalendarViewMode, emit: Boolean) {
-    renderedMode = mode
-    requestRefresh()
-    if (emit) {
-      onViewModeChange?.invoke(ViewModeChangeEvent(mode))
-    }
-  }
-
-  private fun applyCollapsedMode(emit: Boolean) {
-    if (renderedMode != CalendarViewMode.MONTH && renderedMode != CalendarViewMode.YEAR) {
-      renderedMode = if (collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
-      requestRefresh()
-      if (emit) {
-        onViewModeChange?.invoke(ViewModeChangeEvent(renderedMode))
+    LazyVerticalGrid(
+      columns = GridCells.Fixed(3),
+      modifier = Modifier.fillMaxWidth().padding(8.dp)
+    ) {
+      items(names.size) { i ->
+        val isSelected = i == currentMonth
+        Box(
+          modifier = Modifier
+            .padding(4.dp)
+            .clip(RoundedCornerShape((ap.cornerRadius ?: 8.0).dp))
+            .background(
+              if (isSelected) parseColor(ap.pickerCellSelectedBackgroundColor ?: ap.selectedDayBackgroundColor)
+              else parseColor(ap.pickerCellBackgroundColor ?: ap.backgroundColor)
+            )
+            .clickable { goToMonth(i.toDouble()) }
+            .padding(vertical = 10.dp),
+          contentAlignment = Alignment.Center
+        ) {
+          Text(
+            text = names[i],
+            color = if (isSelected) parseColor(ap.pickerCellSelectedTextColor ?: ap.selectedDayTextColor)
+                    else parseColor(ap.pickerCellTextColor ?: ap.dayTextColor),
+            fontSize = (ap.fontSizeDay ?: 14.0).sp
+          )
+        }
       }
     }
   }
 
-  private fun rebuildData() {
-    when (renderedMode) {
-      CalendarViewMode.MONTH -> {
-        val source = strings.monthNamesFull ?: strings.monthNamesShort
-        pickerItems = if (source.size >= 12) source.take(12) else (0..11).map { source.getOrNull(it) ?: (it + 1).toString() }
-      }
-      CalendarViewMode.YEAR -> {
-        pickerItems = (0..11).map { (yearSliceStart + it).toString() }
-      }
-      CalendarViewMode.WEEK -> {
-        dayItems = buildWeekItems()
-      }
-      CalendarViewMode.DAY -> {
-        dayItems = buildMonthItems()
+  @Composable
+  private fun YearPickerView() {
+    val ap = _appearance
+    val currentYear = calendarFor(_selectedTimestampMs).get(Calendar.YEAR)
+    val years = (0..11).map { _yearSliceStart + it }
+
+    LazyVerticalGrid(
+      columns = GridCells.Fixed(3),
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(8.dp)
+        .pointerInput(Unit) {
+          var totalDrag = 0f
+          detectHorizontalDragGestures(
+            onDragStart = { totalDrag = 0f },
+            onDragEnd = {
+              if (totalDrag > 50f) _yearSliceStart -= 12
+              else if (totalDrag < -50f) _yearSliceStart += 12
+            },
+            onHorizontalDrag = { _, dragAmount -> totalDrag += dragAmount }
+          )
+        }
+    ) {
+      items(years.size) { i ->
+        val year = years[i]
+        val isSelected = year == currentYear
+        Box(
+          modifier = Modifier
+            .padding(4.dp)
+            .clip(RoundedCornerShape((ap.cornerRadius ?: 8.0).dp))
+            .background(
+              if (isSelected) parseColor(ap.pickerCellSelectedBackgroundColor ?: ap.selectedDayBackgroundColor)
+              else parseColor(ap.pickerCellBackgroundColor ?: ap.backgroundColor)
+            )
+            .clickable { goToYear(year.toDouble()) }
+            .padding(vertical = 10.dp),
+          contentAlignment = Alignment.Center
+        ) {
+          Text(
+            text = year.toString(),
+            color = if (isSelected) parseColor(ap.pickerCellSelectedTextColor ?: ap.selectedDayTextColor)
+                    else parseColor(ap.pickerCellTextColor ?: ap.dayTextColor),
+            fontSize = (ap.fontSizeDay ?: 14.0).sp
+          )
+        }
       }
     }
   }
 
-  private fun buildMonthItems(): List<DayItem> {
-    val items = mutableListOf<DayItem>()
-    val monthStart = (displayedMonthAnchor.clone() as Calendar).startOfMonth()
-    val daysInMonth = monthStart.getActualMaximum(Calendar.DAY_OF_MONTH)
-    val leading = (monthStart.get(Calendar.DAY_OF_WEEK) - monthStart.firstDayOfWeek + 7) % 7
-    val cursor = monthStart.clone() as Calendar
+  // MARK: - Helpers
+
+  private fun buildDayItems(anchor: Calendar): List<DayItemModel> {
+    val items = mutableListOf<DayItemModel>()
+    val firstDay = (weekStartsOn.toInt().coerceIn(0, 6) + 1)
+    anchor.firstDayOfWeek = firstDay
+    val daysInMonth = anchor.getActualMaximum(Calendar.DAY_OF_MONTH)
+    val leading = (anchor.get(Calendar.DAY_OF_WEEK) - anchor.firstDayOfWeek + 7) % 7
+    val cursor = anchor.clone() as Calendar
     cursor.add(Calendar.DAY_OF_MONTH, -leading)
     val count = ((leading + daysInMonth + 6) / 7) * 7
+    val todayCal = Calendar.getInstance(resolveTimeZone())
+    val selectedCal = calendarFor(_selectedTimestampMs)
+
+    // isCurrentMonth is always relative to the page anchor month (the displayed month),
+    // same in both week and month view. Grey days are those outside the anchor month.
+    // Tapping a grey day in week view just selects it — it stays grey (same as legacy).
     repeat(count) {
-      items.add(buildDayItem(cursor))
+      val ts = cursor.timeInMillis.toDouble()
+      val inMonth = cursor.get(Calendar.MONTH) == anchor.get(Calendar.MONTH)
+                 && cursor.get(Calendar.YEAR) == anchor.get(Calendar.YEAR)
+      val isToday = sameDay(cursor, todayCal)
+      val isSelected = sameDay(cursor, selectedCal)
+      val isDisabled = (_minTimestampMs?.let { ts < it } ?: false) || (_maxTimestampMs?.let { ts > it } ?: false)
+      val dayKey = dayStartMs(ts).toLong()
+      val dots = min(3, _markers[dayKey]?.size ?: 0)
+      items.add(DayItemModel(ts, cursor.get(Calendar.DAY_OF_MONTH).toString(), inMonth, isToday, isSelected, isDisabled, dots))
       cursor.add(Calendar.DAY_OF_MONTH, 1)
     }
     return items
   }
 
-  private fun buildWeekItems(): List<DayItem> {
-    val items = mutableListOf<DayItem>()
-    val weekStart = (selectedCalendar.clone() as Calendar).apply {
-      set(Calendar.DAY_OF_WEEK, firstDayOfWeek)
+  private fun emitVisibleRange(pageIndex: Int) {
+    val offset = pageIndex - 10_000
+    val anchor = calendarFor(_selectedTimestampMs).apply { add(Calendar.MONTH, offset) }.startOfMonth()
+    val prev = (anchor.clone() as Calendar).apply { add(Calendar.MONTH, -1) }
+    val nextBoundary = (anchor.clone() as Calendar).apply {
+      add(Calendar.MONTH, 2); add(Calendar.MILLISECOND, -1)
     }
-    repeat(7) {
-      items.add(buildDayItem(weekStart))
-      weekStart.add(Calendar.DAY_OF_MONTH, 1)
-    }
-    return items
+    onVisibleRangeChange?.invoke(VisibleRangeChangeEvent(prev.timeInMillis.toDouble(), nextBoundary.timeInMillis.toDouble()))
   }
 
-  private fun buildDayItem(cal: Calendar): DayItem {
-    val timestamp = cal.timeInMillis.toDouble()
-    val selected = sameDay(cal, selectedCalendar)
-    val today = sameDay(cal, Calendar.getInstance(resolveTimeZone()))
-    val currentMonth = cal.get(Calendar.MONTH) == displayedMonthAnchor.get(Calendar.MONTH)
-    val disabled = isOutOfRange(timestamp)
-    val dots = markersByDayStart[dayStartMs(timestamp).toLong()]?.size ?: 0
-    return DayItem(
-      timestampMs = timestamp,
-      dayLabel = cal.get(Calendar.DAY_OF_MONTH).toString(),
-      isSelected = selected,
-      isToday = today,
-      isCurrentMonth = currentMonth || renderedMode == CalendarViewMode.WEEK,
-      isDisabled = disabled,
-      dotCount = min(3, dots)
-    )
-  }
-
-  private fun onDayCellPressed(item: DayItem) {
-    if (item.isDisabled) return
-    selectedTimestampMs = item.timestampMs
-    selectedCalendar = calendarFor(item.timestampMs)
-    if (renderedMode == CalendarViewMode.DAY) {
-      displayedMonthAnchor = (selectedCalendar.clone() as Calendar).startOfMonth()
-    }
-    onDateChange?.invoke(DateChangeEvent(item.timestampMs))
-    requestRefresh()
-  }
-
-  private fun onPickerCellPressed(value: String, index: Int) {
-    if (renderedMode == CalendarViewMode.MONTH) {
-      goToMonth(index.toDouble())
-      return
-    }
-    if (renderedMode == CalendarViewMode.YEAR) {
-      goToYear((value.toIntOrNull() ?: selectedCalendar.get(Calendar.YEAR)).toDouble())
-    }
-  }
-
-  private fun shiftTimeline(forward: Boolean) {
-    val delta = if (forward) 1 else -1
-    when (renderedMode) {
-      CalendarViewMode.YEAR -> yearSliceStart += 12 * delta
-      CalendarViewMode.WEEK -> {
-        selectedCalendar.add(Calendar.WEEK_OF_YEAR, delta)
-        selectedTimestampMs = selectedCalendar.timeInMillis.toDouble()
-        displayedMonthAnchor = (selectedCalendar.clone() as Calendar).startOfMonth()
-      }
-      else -> {
-        displayedMonthAnchor.add(Calendar.MONTH, delta)
-        displayedMonthAnchor = (displayedMonthAnchor.clone() as Calendar).startOfMonth()
-      }
-    }
-    requestRefresh()
-  }
-
-  private fun emitVisibleRangeIfNeeded() {
-    val prev = (displayedMonthAnchor.clone() as Calendar).apply { add(Calendar.MONTH, -1); set(Calendar.DAY_OF_MONTH, 1) }
-    val nextBoundary = (displayedMonthAnchor.clone() as Calendar).apply {
-      add(Calendar.MONTH, 2)
-      set(Calendar.DAY_OF_MONTH, 1)
-      add(Calendar.MILLISECOND, -1)
-    }
-    val pair = prev.timeInMillis.toDouble() to nextBoundary.timeInMillis.toDouble()
-    val previous = lastVisibleRange
-    if (previous != null && abs(previous.first - pair.first) < 1.0 && abs(previous.second - pair.second) < 1.0) {
-      return
-    }
-    lastVisibleRange = pair
-    onVisibleRangeChange?.invoke(VisibleRangeChangeEvent(pair.first, pair.second))
-  }
-
-  private fun calendarFor(timestampMs: Double): Calendar {
-    return Calendar.getInstance(resolveTimeZone()).apply {
+  private fun calendarFor(ms: Double): Calendar =
+    Calendar.getInstance(resolveTimeZone()).apply {
       firstDayOfWeek = weekStartsOn.toInt().coerceIn(0, 6) + 1
-      timeInMillis = timestampMs.toLong()
+      timeInMillis = ms.toLong()
     }
-  }
 
-  private fun dayStartMs(timestampMs: Double): Double {
-    val cal = calendarFor(timestampMs)
-    cal.set(Calendar.HOUR_OF_DAY, 0)
-    cal.set(Calendar.MINUTE, 0)
-    cal.set(Calendar.SECOND, 0)
-    cal.set(Calendar.MILLISECOND, 0)
+  private fun dayStartMs(ms: Double): Double {
+    val cal = calendarFor(ms)
+    cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0)
+    cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0)
     return cal.timeInMillis.toDouble()
   }
 
-  private fun isOutOfRange(timestampMs: Double): Boolean {
-    if (minTimestampMs != null && timestampMs < minTimestampMs!!) return true
-    if (maxTimestampMs != null && timestampMs > maxTimestampMs!!) return true
-    return false
+  private fun sameDay(a: Calendar, b: Calendar) =
+    a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
+
+  private fun resolveTimeZone(): TimeZone =
+    if (!timeZoneId.isNullOrBlank()) TimeZone.getTimeZone(timeZoneId) else TimeZone.getDefault()
+
+  private fun parseColor(hex: String): Color {
+    return try { Color(android.graphics.Color.parseColor(if (hex.startsWith("#")) hex else "#$hex")) }
+    catch (_: Throwable) { Color.Black }
   }
 
-  private fun sameDay(first: Calendar, second: Calendar): Boolean {
-    return first.get(Calendar.YEAR) == second.get(Calendar.YEAR) &&
-      first.get(Calendar.DAY_OF_YEAR) == second.get(Calendar.DAY_OF_YEAR)
-  }
-
-  private fun resolveTimeZone(): TimeZone {
-    val id = timeZoneId
-    return if (!id.isNullOrBlank()) TimeZone.getTimeZone(id) else TimeZone.getDefault()
-  }
-
-  private fun parseColorSafe(value: String): Int {
-    return try {
-      value.toColorInt()
-    } catch (_: Throwable) {
-      Color.BLACK
-    }
-  }
-
-  private fun Int.dp(): Int {
-    return floor(this * context.resources.displayMetrics.density).toInt()
-  }
-
-  private fun LinearLayout.childrenIndexed(): List<Pair<Int, View>> {
-    val list = mutableListOf<Pair<Int, View>>()
-    for (index in 0 until childCount) {
-      list.add(index to getChildAt(index))
-    }
-    return list
+  private fun Calendar.startOfMonth(): Calendar {
+    set(Calendar.DAY_OF_MONTH, 1)
+    set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+    set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    return this
   }
 
   companion object {
-    private fun defaultStrings(): CalendarStrings {
-      return CalendarStrings(
-        monthNamesShort = arrayOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
-        monthNamesFull = null,
-        weekdayNamesMin = arrayOf("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"),
-        headerToday = "Today",
-        headerBack = "Back",
-        labelShowWeekView = null,
-        labelShowMonthView = null,
-        accessibilityPrev = null,
-        accessibilityNext = null
-      )
-    }
+    fun defaultStrings() = CalendarStrings(
+      monthNamesShort = arrayOf("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),
+      monthNamesFull = null,
+      weekdayNamesMin = arrayOf("Mo","Tu","We","Th","Fr","Sa","Su"),
+      headerToday = "Today", headerBack = "Back",
+      labelShowWeekView = null, labelShowMonthView = null,
+      accessibilityPrev = null, accessibilityNext = null
+    )
 
-    private fun defaultAppearance(): CalendarAppearance {
-      return CalendarAppearance(
-        backgroundColor = "#FFFFFF",
-        separatorColor = null,
-        headerBackgroundColor = null,
-        headerTitleColor = "#111827",
-        headerSubtitleColor = null,
-        headerButtonColor = "#2563EB",
-        headerTodayColor = null,
-        weekdayTextColor = "#6B7280",
-        weekdayFontSize = 12.0,
-        weekdayFontWeight = null,
-        dayTextColor = "#111827",
-        dayOutsideMonthTextColor = "#9CA3AF",
-        selectedDayBackgroundColor = "#2563EB",
-        selectedDayTextColor = "#FFFFFF",
-        todayTextColor = "#2563EB",
-        todayIndicatorColor = null,
-        disabledDayTextColor = "#D1D5DB",
-        pickerCellBackgroundColor = null,
-        pickerCellSelectedBackgroundColor = null,
-        pickerCellTextColor = null,
-        pickerCellSelectedTextColor = null,
-        fontFamily = null,
-        fontSizeDay = 14.0,
-        fontSizeHeader = 14.0,
-        fontWeight = null,
-        dayCellSize = null,
-        rowHeight = 40.0,
-        headerHeight = 36.0,
-        spacing = 0.0,
-        cornerRadius = 8.0,
-        borderColor = null,
-        borderWidth = null,
-        markerPalette = arrayOf("#2563EB"),
-        markerAccentColor = null
-      )
-    }
+    fun defaultAppearance() = CalendarAppearance(
+      backgroundColor = "#FFFFFF", separatorColor = null, headerBackgroundColor = null,
+      headerTitleColor = "#111827", headerSubtitleColor = null, headerButtonColor = "#2563EB",
+      headerTodayColor = null, weekdayTextColor = "#6B7280", weekdayFontSize = 12.0,
+      weekdayFontWeight = null, dayTextColor = "#111827", dayOutsideMonthTextColor = "#9CA3AF",
+      selectedDayBackgroundColor = "#2563EB", selectedDayTextColor = "#FFFFFF",
+      todayTextColor = "#2563EB", todayIndicatorColor = null, disabledDayTextColor = "#D1D5DB",
+      pickerCellBackgroundColor = null, pickerCellSelectedBackgroundColor = null,
+      pickerCellTextColor = null, pickerCellSelectedTextColor = null, fontFamily = null,
+      fontSizeDay = 14.0, fontSizeHeader = 14.0, fontWeight = null, dayCellSize = null,
+      rowHeight = 40.0, headerHeight = 36.0, spacing = 0.0, cornerRadius = 8.0,
+      borderColor = null, borderWidth = null, markerPalette = arrayOf("#2563EB"), markerAccentColor = null
+    )
   }
 }
 
-private data class DayItem(
+private data class DayItemModel(
   val timestampMs: Double,
-  val dayLabel: String,
-  val isSelected: Boolean,
-  val isToday: Boolean,
+  val label: String,
   val isCurrentMonth: Boolean,
+  val isToday: Boolean,
+  val isSelected: Boolean,
   val isDisabled: Boolean,
   val dotCount: Int
 )
-
-private class DayAdapter(
-  private val onPress: (DayItem) -> Unit
-) : RecyclerView.Adapter<DayViewHolder>() {
-  private var items: List<DayItem> = emptyList()
-  private var appearance: CalendarAppearance? = null
-
-  fun submitItems(items: List<DayItem>, appearance: CalendarAppearance, strings: CalendarStrings) {
-    this.items = items
-    this.appearance = appearance
-    notifyDataSetChanged()
-  }
-
-  override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): DayViewHolder {
-    return DayViewHolder.create(parent)
-  }
-
-  override fun getItemCount(): Int = items.size
-
-  override fun onBindViewHolder(holder: DayViewHolder, position: Int) {
-    val app = appearance ?: return
-    val item = items[position]
-    holder.bind(item, app)
-    holder.itemView.setOnClickListener { onPress(item) }
-  }
-}
-
-private class DayViewHolder private constructor(private val frame: FrameLayout) : RecyclerView.ViewHolder(frame) {
-  private val title = frame.getChildAt(0) as TextView
-  private val dotsRow = frame.getChildAt(1) as LinearLayout
-
-  fun bind(item: DayItem, appearance: CalendarAppearance) {
-    val textColor = when {
-      item.isDisabled -> appearance.disabledDayTextColor
-      item.isSelected -> appearance.selectedDayTextColor
-      item.isToday -> appearance.todayTextColor
-      !item.isCurrentMonth -> appearance.dayOutsideMonthTextColor
-      else -> appearance.dayTextColor
-    }
-    title.text = item.dayLabel
-    title.setTextColor(textColor.toColorInt())
-    itemView.setBackgroundColor(if (item.isSelected) appearance.selectedDayBackgroundColor.toColorInt() else Color.TRANSPARENT)
-    dotsRow.removeAllViews()
-    repeat(item.dotCount) {
-      val dot = View(itemView.context)
-      val size = 4 * itemView.context.resources.displayMetrics.density
-      val params = LinearLayout.LayoutParams(size.toInt(), size.toInt())
-      params.marginEnd = 2
-      dot.layoutParams = params
-      dot.setBackgroundColor((appearance.markerAccentColor ?: appearance.todayTextColor).toColorInt())
-      dotsRow.addView(dot)
-    }
-  }
-
-  companion object {
-    fun create(parent: android.view.ViewGroup): DayViewHolder {
-      val context = parent.context
-      val density = context.resources.displayMetrics.density
-      val frame = FrameLayout(context).apply {
-        minimumHeight = (44 * density).toInt()
-      }
-      val title = TextView(context).apply {
-        gravity = Gravity.CENTER
-        includeFontPadding = false
-        textSize = 15f
-      }
-      val dots = LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-      }
-      frame.addView(
-        title,
-        FrameLayout.LayoutParams(
-          FrameLayout.LayoutParams.MATCH_PARENT,
-          FrameLayout.LayoutParams.MATCH_PARENT,
-          Gravity.CENTER,
-        ),
-      )
-      frame.addView(
-        dots,
-        FrameLayout.LayoutParams(
-          FrameLayout.LayoutParams.WRAP_CONTENT,
-          FrameLayout.LayoutParams.WRAP_CONTENT,
-          Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-        ).apply {
-          bottomMargin = (2 * density).toInt()
-        },
-      )
-      return DayViewHolder(frame)
-    }
-  }
-}
-
-private class PickerAdapter(
-  private val onPress: (String, Int) -> Unit
-) : RecyclerView.Adapter<PickerViewHolder>() {
-  private var values: List<String> = emptyList()
-  private var mode: CalendarViewMode = CalendarViewMode.MONTH
-  private var selectedYear: Int = 0
-  private var selectedMonth: Int = 0
-
-  fun submitItems(values: List<String>, mode: CalendarViewMode, selectedYear: Int, selectedMonth: Int) {
-    this.values = values
-    this.mode = mode
-    this.selectedYear = selectedYear
-    this.selectedMonth = selectedMonth
-    notifyDataSetChanged()
-  }
-
-  override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): PickerViewHolder {
-    return PickerViewHolder(TextView(parent.context).apply {
-      gravity = Gravity.CENTER
-      minHeight = (44 * resources.displayMetrics.density).toInt()
-    })
-  }
-
-  override fun getItemCount(): Int = values.size
-
-  override fun onBindViewHolder(holder: PickerViewHolder, position: Int) {
-    val value = values[position]
-    val selected = when (mode) {
-      CalendarViewMode.MONTH -> position == selectedMonth
-      CalendarViewMode.YEAR -> value.toIntOrNull() == selectedYear
-      else -> false
-    }
-    holder.bind(value, selected)
-    holder.itemView.setOnClickListener { onPress(value, position) }
-  }
-}
-
-private class PickerViewHolder(private val label: TextView) : RecyclerView.ViewHolder(label) {
-  fun bind(value: String, selected: Boolean) {
-    label.text = value
-    label.setBackgroundColor(if (selected) "#2563EB".toColorInt() else Color.TRANSPARENT)
-    label.setTextColor(if (selected) Color.WHITE else "#111827".toColorInt())
-  }
-}
-
-private fun Calendar.startOfMonth(): Calendar {
-  set(Calendar.DAY_OF_MONTH, 1)
-  set(Calendar.HOUR_OF_DAY, 0)
-  set(Calendar.MINUTE, 0)
-  set(Calendar.SECOND, 0)
-  set(Calendar.MILLISECOND, 0)
-  return this
-}
