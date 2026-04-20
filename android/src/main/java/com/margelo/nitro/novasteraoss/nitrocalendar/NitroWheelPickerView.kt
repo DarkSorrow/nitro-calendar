@@ -19,7 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -33,8 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.facebook.proguard.annotations.DoNotStrip
 import com.facebook.react.uimanager.ThemedReactContext
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
@@ -155,30 +155,46 @@ class HybridNitroWheelPickerView(private val context: ThemedReactContext) :
     val initDataPos = if (_loop) loopMid + _selectedIndex else _selectedIndex
     val lazyListState = rememberLazyListState(initialFirstVisibleItemIndex = dataToList(initDataPos))
     val snapBehavior = rememberSnapFlingBehavior(lazyListState)
-    val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+
+    // After reading index from scroll settle, skip one LaunchedEffect(_selectedIndex) run so we don't
+    // animateScrollToItem against the snap (that caused wrong/jumping values).
+    val skipNextProgrammaticAlign = remember { mutableStateOf(false) }
 
     LaunchedEffect(lazyListState) {
       snapshotFlow { lazyListState.isScrollInProgress }
         .filter { !it }
+        .drop(1)
         .collect {
-          val centeredListIdx = lazyListState.firstVisibleItemIndex
-          val dataIdx = listToData(centeredListIdx).coerceIn(0, dataCount - 1)
+          val listIdx = lazyListState.firstVisibleItemIndex
+          val dataIdx = listToData(listIdx).coerceIn(0, dataCount - 1)
           val logical = dataIdx % vals.size
           if (logical != _selectedIndex) {
+            skipNextProgrammaticAlign.value = true
             _selectedIndex = logical
             selectedIndex = logical.toDouble()
             onValueChange?.invoke(WheelPickerValueChangeEvent(logical.toDouble(), vals[logical]))
           }
           onSettled(WheelPickerValueChangeEvent(logical.toDouble(), vals[logical]))
+          // Loop buffer: recentre only when far from ideal (per-settle scrollToItem fought the list).
+          if (_loop) {
+            val idealListIdx = dataToList(loopMid + logical)
+            if (abs(listIdx - idealListIdx) > vals.size * 3) {
+              lazyListState.scrollToItem(idealListIdx)
+            }
+          }
         }
     }
 
     LaunchedEffect(_selectedIndex) {
+      if (skipNextProgrammaticAlign.value) {
+        skipNextProgrammaticAlign.value = false
+        return@LaunchedEffect
+      }
       val targetDataPos = if (_loop) loopMid + _selectedIndex else _selectedIndex
       val targetListIdx = dataToList(targetDataPos)
       if (abs(lazyListState.firstVisibleItemIndex - targetListIdx) > 0) {
-        scope.launch { lazyListState.animateScrollToItem(targetListIdx) }
+        lazyListState.animateScrollToItem(targetListIdx)
       }
     }
 

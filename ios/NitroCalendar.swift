@@ -94,7 +94,7 @@ class HybridNitroCalendar: HybridNitroCalendarSpec {
     selectedTimestampMs = now.timeIntervalSince1970 * 1000
     vm.selectedTimestampMs = selectedTimestampMs
     vm.pageIndex = 10_000
-    vm.weekIndex = 0
+    syncWeekIndexToSelection(forPageIndex: 10_000)
     if vm.mode == .month || vm.mode == .year {
       vm.mode = vm.collapsedWeekMode ? .week : .day
       vm.onViewModeChange?(ViewModeChangeEvent(mode: vm.mode))
@@ -115,6 +115,7 @@ class HybridNitroCalendar: HybridNitroCalendarSpec {
       let updatedComps = vm.calendarEngine.dateComponents([.year, .month], from: updated)
       let monthDiff = (updatedComps.year! - todayComps.year!) * 12 + (updatedComps.month! - todayComps.month!)
       vm.pageIndex = 10_000 + monthDiff
+      syncWeekIndexToSelection(forPageIndex: vm.pageIndex)
       vm.mode = vm.collapsedWeekMode ? .week : .day
     }
   }
@@ -133,6 +134,7 @@ class HybridNitroCalendar: HybridNitroCalendarSpec {
       let updatedComps = vm.calendarEngine.dateComponents([.year, .month], from: updated)
       let monthDiff = (updatedComps.year! - todayComps.year!) * 12 + (updatedComps.month! - todayComps.month!)
       vm.pageIndex = 10_000 + monthDiff
+      syncWeekIndexToSelection(forPageIndex: vm.pageIndex)
       vm.mode = vm.collapsedWeekMode ? .week : .day
     }
   }
@@ -165,6 +167,34 @@ class HybridNitroCalendar: HybridNitroCalendarSpec {
     let date = Date(timeIntervalSince1970: ms / 1000)
     let start = vm.calendarEngine.startOfDay(for: date)
     return start.timeIntervalSince1970 * 1000
+  }
+
+  /// Align `weekIndex` with the week row that contains the selected day (parity with Android `syncWeekIndexToSelectionForPage`).
+  private func syncWeekIndexToSelection(forPageIndex pageIndex: Int) {
+    let cal = vm.calendarEngine
+    let offset = pageIndex - 10_000
+    let todayComps = cal.dateComponents([.year, .month], from: Date())
+    guard let todayMonthStart = cal.date(from: DateComponents(year: todayComps.year, month: todayComps.month, day: 1)),
+          let anchorMonth = cal.date(byAdding: .month, value: offset, to: todayMonthStart),
+          let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: anchorMonth)),
+          let monthRange = cal.range(of: .day, in: .month, for: monthStart) else {
+      vm.weekIndex = 0
+      return
+    }
+    let firstWeekday = cal.component(.weekday, from: monthStart)
+    let leading = (firstWeekday - cal.firstWeekday + 7) % 7
+    let totalCells = ((leading + monthRange.count + 6) / 7) * 7
+    let totalWeeks = totalCells / 7
+    let selectedDate = Date(timeIntervalSince1970: vm.selectedTimestampMs / 1000)
+    var found = 0
+    for i in 0..<totalCells {
+      if let date = cal.date(byAdding: .day, value: i - leading, to: monthStart),
+         cal.isDate(date, inSameDayAs: selectedDate) {
+        found = i / 7
+        break
+      }
+    }
+    vm.weekIndex = min(max(0, found), max(0, totalWeeks - 1))
   }
 
   static func defaultAppearance() -> CalendarAppearance {
@@ -355,12 +385,16 @@ struct CalendarHeaderView: View {
     let totalCells = ((leading + monthRange.count + 6) / 7) * 7
     let totalWeeks = totalCells / 7
 
+    // Chronological next/prev month page: same delta rules as Android HorizontalPager.
+    let pageDeltaNext = vm.isRTL ? -1 : 1
+    let pageDeltaPrev = vm.isRTL ? 1 : -1
+
     if forward {
       if vm.weekIndex < totalWeeks - 1 {
         vm.weekIndex += 1
       } else {
         vm.weekIndex = 0
-        vm.pageIndex += 1
+        vm.pageIndex += pageDeltaNext
       }
     } else {
       if vm.weekIndex > 0 {
@@ -376,7 +410,7 @@ struct CalendarHeaderView: View {
         let prevLeading = (prevFirstWeekday - cal.firstWeekday + 7) % 7
         let prevTotalCells = ((prevLeading + prevRange.count + 6) / 7) * 7
         vm.weekIndex = (prevTotalCells / 7) - 1
-        vm.pageIndex -= 1
+        vm.pageIndex += pageDeltaPrev
       }
     }
   }
@@ -429,21 +463,47 @@ struct DayGridView: View {
       }
     }
     .tabViewStyle(.page(indexDisplayMode: .never))
-    .onChange(of: vm.pageIndex) { _ in }
+    .onValueChange(of: vm.weekIndex) {
+      emitVisibleRange(for: vm.pageIndex)
+    }
+    .onValueChange(of: vm.collapsedWeekMode) {
+      emitVisibleRange(for: vm.pageIndex)
+    }
   }
 
+  /// Visible range follows `(pager month, weekIndex, firstDayOfWeek)` — not selection alone (parity with Android).
   private func emitVisibleRange(for pageIndex: Int) {
+    let cal = vm.calendarEngine
     let offset = pageIndex - 10_000
-    let anchor = vm.calendarEngine.date(byAdding: .month, value: offset, to: startOfCurrentMonth()) ?? Date()
-    guard
-      let prev = vm.calendarEngine.date(byAdding: .month, value: -1, to: anchor),
-      let next = vm.calendarEngine.date(byAdding: .month, value: 2, to: anchor),
-      let nextEnd = vm.calendarEngine.date(byAdding: .second, value: -1, to: next)
-    else { return }
-    vm.onVisibleRangeChange?(VisibleRangeChangeEvent(
-      startMs: prev.timeIntervalSince1970 * 1000,
-      endMs: nextEnd.timeIntervalSince1970 * 1000
-    ))
+    guard let anchorMonth = cal.date(byAdding: .month, value: offset, to: startOfCurrentMonth()) else { return }
+    guard let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: anchorMonth)) else { return }
+
+    if vm.collapsedWeekMode {
+      guard let monthRange = cal.range(of: .day, in: .month, for: monthStart) else { return }
+      let firstWeekday = cal.component(.weekday, from: monthStart)
+      let leading = (firstWeekday - cal.firstWeekday + 7) % 7
+      let totalCells = ((leading + monthRange.count + 6) / 7) * 7
+      let totalWeeks = totalCells / 7
+      guard totalWeeks > 0 else { return }
+      let safeIdx = min(max(0, vm.weekIndex), totalWeeks - 1)
+      guard let startDate = cal.date(byAdding: .day, value: safeIdx * 7 - leading, to: monthStart) else { return }
+      guard let endDate = cal.date(byAdding: .day, value: 6, to: startDate) else { return }
+      let startMs = cal.startOfDay(for: startDate).timeIntervalSince1970 * 1000
+      let end = cal.date(bySettingHour: 23, minute: 59, second: 59, of: endDate) ?? endDate
+      vm.onVisibleRangeChange?(VisibleRangeChangeEvent(
+        startMs: startMs,
+        endMs: end.timeIntervalSince1970 * 1000
+      ))
+    } else {
+      guard let range = cal.range(of: .day, in: .month, for: monthStart),
+            let lastDay = cal.date(byAdding: .day, value: range.count - 1, to: monthStart) else { return }
+      let startMs = cal.startOfDay(for: monthStart).timeIntervalSince1970 * 1000
+      let end = cal.date(bySettingHour: 23, minute: 59, second: 59, of: lastDay) ?? lastDay
+      vm.onVisibleRangeChange?(VisibleRangeChangeEvent(
+        startMs: startMs,
+        endMs: end.timeIntervalSince1970 * 1000
+      ))
+    }
   }
 
   private func startOfCurrentMonth() -> Date {
@@ -669,6 +729,24 @@ struct YearPickerView: View {
       }
     }
     .padding(8)
+  }
+}
+
+// MARK: - SwiftUI onChange (iOS 17+ non-deprecated API + older OS fallback)
+
+private extension View {
+  /// Uses the iOS 17+ `onChange` overload; falls back to the legacy single-parameter form on iOS 16 and earlier.
+  @ViewBuilder
+  func onValueChange<Value: Equatable>(of value: Value, perform action: @escaping () -> Void) -> some View {
+    if #available(iOS 17.0, *) {
+      self.onChange(of: value) {
+        action()
+      }
+    } else {
+      self.onChange(of: value) { _ in
+        action()
+      }
+    }
   }
 }
 

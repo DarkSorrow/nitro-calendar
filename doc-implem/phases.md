@@ -48,6 +48,7 @@ Product calendar UI, full Nitro contracts, and wheel spec start in **Phases 1–
 - [x] iOS + Android: grid, scrolling/paging as designed in `implem.md`
 - [x] Header UX: day / month / year modes, today ↔ back, week↔month collapse
 - [x] RTL: navigation semantics coordinated with `I18nManager` (no double flip)
+- [x] Android: collapsed week mode uses dedicated `navigateWeek` + horizontal drag (pager scroll off); `onVisibleRangeChange` anchored to visible pager month and week slice; iOS `emitVisibleRange` + RTL month-step parity aligned
 
 ---
 
@@ -64,6 +65,7 @@ Product calendar UI, full Nitro contracts, and wheel spec start in **Phases 1–
 - [x] `scrollTo(index)` animated on both platforms
 - [x] `WheelPickerAppearance` applied (colors, font, divider lines)
 - [x] Parity test screen in `example/` — 24h/12h wheels, loop on/off, event log
+- [x] Android (Compose) wheel: user settle vs programmatic `selectedIndex` guards; loop mode recenters with `scrollToItem` after user fling (no duplicate animated settle)
 - [ ] Device profiling pass (Instruments / Android Profiler)
 - [ ] Cross-platform parity table (§3.5) filled after device testing
 

@@ -1,6 +1,8 @@
 buildscript {
+  // Toolchain: Kotlin + AGP aligned with Compose compiler plugin; Java 17 for AGP 8.9+ (TLS/crypto baseline).
   ext.NitroCalendar = [
-    kotlinVersion: "2.0.21",
+    // Match Expo / RN root when composite-built (see example android configure log).
+    kotlinVersion: "2.1.20",
     minSdkVersion: 24,
     compileSdkVersion: 36,
     targetSdkVersion: 36
@@ -20,7 +22,10 @@ buildscript {
   }
 
   dependencies {
-    classpath "com.android.tools.build:gradle:8.7.2"
+    // Explicit AGP: unlike the Expo app root, this module’s `buildscript` does not inherit
+    // `expo-root-project` / version-catalog constraints, so an unversioned coordinate resolves to "".
+    // Keep aligned with the RN/Expo matrix you test against (Gradle 8.14.x + AGP 8.10.x here).
+    classpath "com.android.tools.build:gradle:8.10.0"
     // noinspection DifferentKotlinGradleVersion
     classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${getExtOrDefault('kotlinVersion')}"
     classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:${getExtOrDefault('kotlinVersion')}"
@@ -110,8 +115,14 @@ android {
   }
 
   compileOptions {
-    sourceCompatibility JavaVersion.VERSION_1_8
-    targetCompatibility JavaVersion.VERSION_1_8
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+  kotlinOptions {
+    jvmTarget = "17"
   }
 }
 
@@ -119,8 +130,9 @@ dependencies {
   implementation "com.facebook.react:react-android"
   implementation project(":react-native-nitro-modules")
 
-  // Jetpack Compose BOM (stable 2024.09.00 — matches Compose BOM 2023.06+ requirement)
-  def composeBom = platform("androidx.compose:compose-bom:2024.09.00")
+  // Compose BOM: use a version that exists on https://dl.google.com/dl/android/maven2/ (2026.04.00 was not published).
+  // See https://developer.android.com/develop/ui/compose/bom/bom-mapping
+  def composeBom = platform("androidx.compose:compose-bom:2025.08.01")
   implementation composeBom
   implementation "androidx.compose.ui:ui"
   implementation "androidx.compose.ui:ui-graphics"
@@ -129,5 +141,6 @@ dependencies {
   implementation "androidx.compose.material3:material3"
   implementation "androidx.compose.runtime:runtime"
   implementation "androidx.compose.animation:animation"
-  implementation "androidx.activity:activity-compose:1.9.2"
+  // Activity Compose is versioned outside the Compose BOM; keep in step with Material3 / edge-to-edge releases.
+  implementation "androidx.activity:activity-compose:1.13.0"
 }

@@ -22,13 +22,16 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -45,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import com.facebook.proguard.annotations.DoNotStrip
 import com.facebook.react.uimanager.ThemedReactContext
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.max
@@ -68,6 +72,9 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   private var _minTimestampMs by mutableStateOf<Double?>(null)
   private var _maxTimestampMs by mutableStateOf<Double?>(null)
   private var _markers by mutableStateOf<Map<Long, IntArray>>(emptyMap())
+
+  /** Prevents overlapping week navigations from rapid gestures. */
+  private val navigatingWeek = AtomicBoolean(false)
 
   override var selectedTimestampMs: Double = System.currentTimeMillis().toDouble()
     set(value) { field = value; _selectedTimestampMs = value }
@@ -106,7 +113,7 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
     selectedTimestampMs = now.timeInMillis.toDouble()
     _selectedTimestampMs = selectedTimestampMs
     _pageIndex = 10_000
-    _weekIndex = 0  // today is always in the first visible week when we reset to today's month
+    syncWeekIndexToSelectionForPage(_pageIndex)
     if (_renderedMode == CalendarViewMode.MONTH || _renderedMode == CalendarViewMode.YEAR) {
       _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
     }
@@ -123,6 +130,7 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
     val monthDiff = (cal.get(Calendar.YEAR) - todayCal.get(Calendar.YEAR)) * 12 +
       (cal.get(Calendar.MONTH) - todayCal.get(Calendar.MONTH))
     _pageIndex = 10_000 + monthDiff
+    syncWeekIndexToSelectionForPage(_pageIndex)
     _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
     onViewModeChange?.invoke(ViewModeChangeEvent(_renderedMode))
   }
@@ -139,6 +147,7 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
     val monthDiff = (cal.get(Calendar.YEAR) - todayCal.get(Calendar.YEAR)) * 12 +
       (cal.get(Calendar.MONTH) - todayCal.get(Calendar.MONTH))
     _pageIndex = 10_000 + monthDiff
+    syncWeekIndexToSelectionForPage(_pageIndex)
     _renderedMode = if (_collapsedWeekMode) CalendarViewMode.WEEK else CalendarViewMode.DAY
     onViewModeChange?.invoke(ViewModeChangeEvent(_renderedMode))
   }
@@ -159,7 +168,12 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   @Composable
   private fun CalendarRoot() {
     val scope = rememberCoroutineScope()
-    val pagerState = rememberPagerState(initialPage = _pageIndex) { 20_001 }
+    // Page count is fixed (month index window); offset is relative to "today" month at index 10_000.
+    val pagerState = rememberPagerState(
+      initialPage = _pageIndex,
+      initialPageOffsetFraction = 0f,
+      pageCount = { 20_001 }
+    )
 
     // Derive the displayed month/year from pagerState.currentPage
     val displayedCal = remember(pagerState.currentPage) {
@@ -167,18 +181,34 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
       Calendar.getInstance(resolveTimeZone()).apply { add(Calendar.MONTH, offset) }
     }
 
-    // Sync pager → _pageIndex when user swipes
+    // Pager is the source of truth for visible month; keep _pageIndex in sync.
     LaunchedEffect(pagerState.currentPage) {
-      if (_pageIndex != pagerState.currentPage) {
-        _pageIndex = pagerState.currentPage
-        emitVisibleRange(pagerState.currentPage)
+      _pageIndex = pagerState.currentPage
+      if (!_collapsedWeekMode) {
+        reconcileWeekIndexFromSelected(pagerState.currentPage)
+      } else {
+        val tw = weeksInMonthGrid(anchorCalendarForPage(pagerState.currentPage))
+        if (tw > 0) {
+          _weekIndex = _weekIndex.coerceIn(0, tw - 1)
+        }
       }
     }
 
-    // Sync _pageIndex → pager when set externally (today button, greyed day tap, goToMonth etc.)
+    // Visible range tracks pager month + week slice (not selection).
+    LaunchedEffect(pagerState.currentPage, _collapsedWeekMode, _weekIndex) {
+      emitVisibleRange(pagerState.currentPage)
+    }
+
+    // Sync _pageIndex → pager when set externally (today, goToMonth, etc.)
     LaunchedEffect(_pageIndex) {
       if (pagerState.currentPage != _pageIndex) {
         pagerState.animateScrollToPage(_pageIndex, animationSpec = tween(300))
+      }
+    }
+
+    DisposableEffect(Unit) {
+      onDispose {
+        navigatingWeek.set(false)
       }
     }
 
@@ -189,18 +219,7 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
         displayedCal = displayedCal,
         onChevronPrev = {
           if (_collapsedWeekMode) {
-            if (_weekIndex > 0) {
-              _weekIndex--
-            } else {
-              // At week 0 — go to previous month, set weekIndex to its last week
-              val prevPage = pagerState.currentPage + if (_isRTL) 1 else -1
-              val prevOffset = prevPage - 10_000
-              val nowCal = Calendar.getInstance(resolveTimeZone())
-              val prevAnchor = (nowCal.clone() as Calendar).apply { add(Calendar.MONTH, prevOffset) }.startOfMonth()
-              val prevItems = buildDayItems(prevAnchor)
-              _weekIndex = (prevItems.size / 7) - 1
-              scope.launch { pagerState.animateScrollToPage(prevPage, animationSpec = tween(300)) }
-            }
+            scope.launch { navigateWeek(pagerState, forward = false) }
           } else {
             scope.launch {
               pagerState.animateScrollToPage(
@@ -212,23 +231,7 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
         },
         onChevronNext = {
           if (_collapsedWeekMode) {
-            val currentOffset = pagerState.currentPage - 10_000
-            val nowCal = Calendar.getInstance(resolveTimeZone())
-            val anchor = (nowCal.clone() as Calendar).apply { add(Calendar.MONTH, currentOffset) }.startOfMonth()
-            val items = buildDayItems(anchor)
-            val totalWeeks = items.size / 7
-            if (_weekIndex < totalWeeks - 1) {
-              _weekIndex++
-            } else {
-              // At last week — go to next month, week 0
-              _weekIndex = 0
-              scope.launch {
-                pagerState.animateScrollToPage(
-                  pagerState.currentPage + if (_isRTL) -1 else 1,
-                  animationSpec = tween(300)
-                )
-              }
-            }
+            scope.launch { navigateWeek(pagerState, forward = true) }
           } else {
             scope.launch {
               pagerState.animateScrollToPage(
@@ -370,8 +373,39 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   }
 
   @Composable
-  private fun DayGridView(pagerState: androidx.compose.foundation.pager.PagerState) {
-    HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth()) { page ->
+  private fun DayGridView(pagerState: PagerState) {
+    val scope = rememberCoroutineScope()
+    var totalDrag by remember { mutableFloatStateOf(0f) }
+    val weekSwipeModifier =
+      if (_collapsedWeekMode) {
+        Modifier.pointerInput(_collapsedWeekMode, _isRTL) {
+          detectHorizontalDragGestures(
+            onDragStart = { totalDrag = 0f },
+            onHorizontalDrag = { change, dragAmount ->
+              change.consume()
+              totalDrag += dragAmount
+            },
+            onDragEnd = {
+              val threshold = size.width * 0.2f
+              when {
+                totalDrag < -threshold -> scope.launch { navigateWeek(pagerState, forward = true) }
+                totalDrag > threshold -> scope.launch { navigateWeek(pagerState, forward = false) }
+              }
+              totalDrag = 0f
+            },
+            onDragCancel = { totalDrag = 0f }
+          )
+        }
+      } else {
+        Modifier
+      }
+
+    HorizontalPager(
+      state = pagerState,
+      userScrollEnabled = !_collapsedWeekMode,
+      beyondViewportPageCount = 1,
+      modifier = Modifier.fillMaxWidth().then(weekSwipeModifier)
+    ) { page ->
       MonthGridPage(monthOffset = page - 10_000)
     }
   }
@@ -538,6 +572,77 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   }
 
   // MARK: - Helpers
+  // Visible state contract: (pager month from pageIndex, _weekIndex, firstDayOfWeek via weekStartsOn only).
+
+  private fun firstDayOfWeekCalendarConstant(): Int =
+    weekStartsOn.toInt().coerceIn(0, 6) + 1
+
+  /** Month anchor for a pager page: "today" + offset months, start of month (matches grid / iOS). */
+  private fun anchorCalendarForPage(pageIndex: Int): Calendar {
+    val offset = pageIndex - 10_000
+    return (Calendar.getInstance(resolveTimeZone()) as Calendar).apply {
+      add(Calendar.MONTH, offset)
+    }.startOfMonth()
+  }
+
+  /** Same row count as [buildDayItems] / canonical week grid. */
+  private fun weeksInMonthGrid(anchor: Calendar): Int {
+    val a = anchor.clone() as Calendar
+    a.firstDayOfWeek = firstDayOfWeekCalendarConstant()
+    val daysInMonth = a.getActualMaximum(Calendar.DAY_OF_MONTH)
+    val leading = (a.get(Calendar.DAY_OF_WEEK) - a.firstDayOfWeek + 7) % 7
+    val totalCells = ((leading + daysInMonth + 6) / 7) * 7
+    return totalCells / 7
+  }
+
+  private fun reconcileWeekIndexFromSelected(pageIndex: Int) {
+    val anchor = anchorCalendarForPage(pageIndex)
+    val items = buildDayItems(anchor)
+    if (items.isEmpty()) return
+    val selectedCal = calendarFor(_selectedTimestampMs)
+    val foundIdx = items.indexOfFirst { sameDay(calendarFor(it.timestampMs), selectedCal) }
+    val maxW = max(0, items.size / 7 - 1)
+    _weekIndex = (if (foundIdx >= 0) foundIdx / 7 else 0).coerceIn(0, maxW)
+  }
+
+  private fun syncWeekIndexToSelectionForPage(pageIndex: Int) {
+    reconcileWeekIndexFromSelected(pageIndex)
+  }
+
+  private suspend fun navigateWeek(pagerState: PagerState, forward: Boolean) {
+    if (!navigatingWeek.compareAndSet(false, true)) return
+    try {
+      val currentPage = pagerState.currentPage
+      val anchor = anchorCalendarForPage(currentPage)
+      var tw = weeksInMonthGrid(anchor).coerceAtLeast(1)
+      _weekIndex = _weekIndex.coerceIn(0, tw - 1)
+
+      val pageDeltaNext = if (_isRTL) -1 else 1
+      val pageDeltaPrev = if (_isRTL) 1 else -1
+
+      if (forward) {
+        if (_weekIndex < tw - 1) {
+          _weekIndex++
+        } else {
+          pagerState.scrollToPage(currentPage + pageDeltaNext)
+          val na = anchorCalendarForPage(pagerState.currentPage)
+          tw = weeksInMonthGrid(na).coerceAtLeast(1)
+          _weekIndex = 0.coerceAtMost(tw - 1)
+        }
+      } else {
+        if (_weekIndex > 0) {
+          _weekIndex--
+        } else {
+          pagerState.scrollToPage(currentPage + pageDeltaPrev)
+          val na = anchorCalendarForPage(pagerState.currentPage)
+          tw = weeksInMonthGrid(na).coerceAtLeast(1)
+          _weekIndex = max(0, tw - 1)
+        }
+      }
+    } finally {
+      navigatingWeek.set(false)
+    }
+  }
 
   private fun buildDayItems(anchor: Calendar): List<DayItemModel> {
     val items = mutableListOf<DayItemModel>()
@@ -570,13 +675,36 @@ class HybridNitroCalendar(private val context: ThemedReactContext) : HybridNitro
   }
 
   private fun emitVisibleRange(pageIndex: Int) {
-    val offset = pageIndex - 10_000
-    val anchor = calendarFor(_selectedTimestampMs).apply { add(Calendar.MONTH, offset) }.startOfMonth()
-    val prev = (anchor.clone() as Calendar).apply { add(Calendar.MONTH, -1) }
-    val nextBoundary = (anchor.clone() as Calendar).apply {
-      add(Calendar.MONTH, 2); add(Calendar.MILLISECOND, -1)
+    val anchor = anchorCalendarForPage(pageIndex)
+    if (_collapsedWeekMode) {
+      val items = buildDayItems(anchor)
+      if (items.isEmpty()) return
+      val tw = max(1, items.size / 7)
+      val idx = _weekIndex.coerceIn(0, tw - 1)
+      val startMs = items[idx * 7].timestampMs
+      val endMs = items[idx * 7 + 6].timestampMs
+      val endCal = calendarFor(endMs).apply {
+        set(Calendar.HOUR_OF_DAY, 23)
+        set(Calendar.MINUTE, 59)
+        set(Calendar.SECOND, 59)
+        set(Calendar.MILLISECOND, 999)
+      }
+      onVisibleRangeChange?.invoke(
+        VisibleRangeChangeEvent(startMs, endCal.timeInMillis.toDouble())
+      )
+    } else {
+      val start = anchor.timeInMillis.toDouble()
+      val endCal = (anchor.clone() as Calendar).apply {
+        set(Calendar.DAY_OF_MONTH, getActualMaximum(Calendar.DAY_OF_MONTH))
+        set(Calendar.HOUR_OF_DAY, 23)
+        set(Calendar.MINUTE, 59)
+        set(Calendar.SECOND, 59)
+        set(Calendar.MILLISECOND, 999)
+      }
+      onVisibleRangeChange?.invoke(
+        VisibleRangeChangeEvent(start, endCal.timeInMillis.toDouble())
+      )
     }
-    onVisibleRangeChange?.invoke(VisibleRangeChangeEvent(prev.timeInMillis.toDouble(), nextBoundary.timeInMillis.toDouble()))
   }
 
   private fun calendarFor(ms: Double): Calendar =
